@@ -1,0 +1,87 @@
+# Adaptive-KL PPO：KL 系数 β 不再是常数，而是每步按观测 KL 调整。
+#
+# 与 ppo.yaml 的差量是**一个块**：多了 algorithm.controllers。损失项、coef 初值、
+# 其余一切逐字相同（有一个测试在守着这条）。
+#
+#     β_{k+1} = clip( β_k + step_size · (KL_k − target_kl), beta_min, beta_max )
+#
+# 这就是原版 PPO 论文里的自适应 KL —— 它把「β 该取多少」从**超参数**变成了
+# **控制问题**。固定 β 的痛点很具体：训练早期策略离参考分布很远，同一个 β
+# 会把策略捆死；训练后期策略贴近了，同一个 β 又几乎不起作用。
+#
+# 两个必须知道的时序事实
+# --------------------
+# 1. **β 在第 k 步的日志里写入，从第 k+1 步开始生效。** 控制器钩子在一步的
+#    全部 minibatch 跑完之后才被调用，而 LossComposition 是在 minibatch 循环
+#    **内部**读 β 的。所以同一步的后续 minibatch 不受本次调整影响 —— 这是
+#    设计上的选择（否则同一步内不同 minibatch 会用不同的 β，梯度就不是同一个
+#    目标的梯度了）。
+#
+# 2. **本步没测到 KL 就不会调 β。** 如果这一步被跳过（例如 DAPO 的动态采样把
+#    组全丢了），钩子根本不会被调用 —— 没有测量就没有调整，这比拿上一步的
+#    旧 KL 去调要对。
+#
+# coef 必须 > 0，这一条会在启动时报错
+# --------------------------------
+# coef: 0.0 会让 KL 项释放对 ref_logprobs 的依赖 -> plan_assembly 判定无人需要
+# 参考模型 -> **Reference 根本不会被构建**。控制器随后要把 β 调上去时，
+# 读 ref_logprobs 会拿到 KeyError。所以这里不是「初值最好非零」的建议，
+# 而是启动时就被拦住的一种配置错误。
+#
+# target_kl 必须随估计量重设
+# ------------------------
+# 控制器读的是 loss/<term>/mean_kl，而 k1 / k2 / k3 报的这个量**不是同一个数**：
+# k1 可为负、k2 有偏偏高、k3 才是通常意义上的 KL。所以把 term 换成 kl_k1
+# 或 kl_k2 时，target_kl 必须一起改，否则控制器会朝一个错误的靶子调节。
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
+  num_generations: 1
+
+reward:
+  scorer:
+    type: fixture_response_mean
+  processors:
+    # 单采样下组内标准差恒为 0，只能用全局归一化。
+    - type: fixture_global_normalize
+
+algorithm:
+  # GAE 的 requires 里有 rollout_values -> Critic 会被构建。
+  advantage:
+    type: gae
+    gamma: 0.99
+    lam: 0.95
+
+  losses:
+    - type: ppo_clip
+      weight: 1.0
+      clip_eps: 0.2
+
+    - type: value_loss
+      weight: 0.5
+      clip_eps: 0.2
+
+    # coef 在这里是 β 的**初值**，之后由下面的控制器接管。
+    # 必须 > 0（理由见文件头）。控制器会把每一步的 β 写回这个组件。
+    - type: kl_k3
+      weight: 1.0
+      coef: 0.01
+
+  # 这就是与 ppo.yaml 的全部差别。
+  #
+  # term 用**损失项的 name()**（也就是 kl_k3），不是 YAML 里的 type 之外的
+  # 什么标识 —— 指标键 loss/kl_k3/mean_kl 就是用同一个标识符拼的，绑定和读数
+  # 共用一个名字，消掉一整类「绑对了项、读错了键」的 bug。
+  # 省略 term 时会自动探测唯一的 kl_* 项；探测到 0 个或 2 个以上都会在启动时报错。
+  controllers:
+    - type: adaptive_kl
+      term: kl_k3
+      target_kl: 0.02       # 注意：这是 k3 的量纲。换估计量要一起改。
+      step_size: 1.0        # 原版 PPO 用的量级。太大 -> β 会来回震荡。
+      beta_min: 0.0
+      beta_max: 1.0
+
+  epochs: 2
+  mini_batch_size: 2

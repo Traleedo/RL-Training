@@ -1,0 +1,152 @@
+"""跑一个离线配置（SFT / DPO）—— 从数据集取样、训练、存盘、可选续跑。
+
+用法::
+
+    python -X utf8 scripts/train_offline.py --config configs/sft.yaml --steps 5
+    python -X utf8 scripts/train_offline.py --config configs/dpo.yaml --steps 20
+    python -X utf8 scripts/train_offline.py --config dpo --steps 5 --save-dir /tmp/ck
+    python -X utf8 scripts/train_offline.py --config dpo --steps 5 --resume /tmp/ck/step_5
+
+为什么 RL 那边没有对应的脚本
+--------------------------
+因为这个脚本有一半在讲一件 RL 侧不存在的事：**数据游标**。
+
+``RLTrainer.train_step(prompts)`` 里「喂哪批 prompt」是调用方的事，训练器不持有
+任何数据状态。离线家族反过来 —— 数据集在训练器里，``train_step()`` 无参数，
+所以「跑到哪儿了」必须由训练器自己记住，并且**存进 checkpoint**。不存的话
+续跑会从数据集开头重训，而那是从 loss 曲线上完全看不出来的偏差。
+
+``--steps`` 指的是 ``train_step`` 的次数，也就是「取几批数据」。数据集过几遍
+是**调用方**的事（这个脚本用 ``--steps`` 来回答），不是 ``algorithm.epochs``
+的事 —— 后者在两个家族里都是「同一个 batch 过几遍」。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+for path in (str(SRC), str(ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="跑一个离线配置（SFT / DPO）")
+    parser.add_argument("--config", required=True, help="配置文件路径")
+    parser.add_argument("--steps", type=int, default=10, help="train_step 的次数")
+    parser.add_argument(
+        "--save-dir",
+        default=None,
+        help="checkpoint 目录。给了就在跑完之后存一个 step_<N>",
+    )
+    parser.add_argument(
+        "--resume", default=None, help="从某个 checkpoint 文件续跑（例如 .../step_2）"
+    )
+    parser.add_argument(
+        "--every", type=int, default=0, help="每 N 步打印一次指标（0 = 每步都打）"
+    )
+    return parser.parse_args(argv)
+
+
+def resolve_config(name: str) -> Path:
+    """允许 ``--config sft`` 这种简写 —— 与 plan.py 走同一份布局知识。
+
+    路径解析集中在 ``core.config.find_config`` 里，这样 configs/ 的目录结构
+    只有一份定义；否则每加一个脚本就多一份会漂移的副本。
+    """
+    from core.config import find_config
+
+    try:
+        return find_config(name, ROOT / "configs")
+    except FileNotFoundError as exc:
+        print(f"找不到配置：{name}\n{exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.steps < 1:
+        print("--steps 必须 >= 1", file=sys.stderr)
+        return 2
+
+    config_path = resolve_config(args.config)
+
+    import components  # noqa: F401  触发真实组件注册
+    import data  # noqa: F401  触发数据集注册
+    import tests.fixtures  # noqa: F401  触发 fixture 组件注册
+
+    from engine.build import build_trainer
+    from core.config import load_config
+
+    cfg = load_config(config_path)
+    if args.save_dir is not None:
+        cfg.checkpointer.save_dir = args.save_dir
+
+    trainer = build_trainer(cfg)
+    kind = str(cfg.trainer.get("kind", "rl")).lower()
+    if kind != "offline":
+        # 这个脚本假设 ``train_step()`` 无参数、且训练器持有数据游标。
+        # 换成一个 RL 配置会在这里就停下，而不是跑出一堆看不懂的报错。
+        print(
+            f"{config_path.name} 的 trainer.kind 是 {kind!r}，不是 'offline'。\n"
+            f"这个脚本只跑离线配置（sft / dpo）；RL 配置请用 scripts/verify_e2e.py。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.resume:
+        trainer.resume(args.resume)
+        print(f"从 {args.resume} 续跑（global_step={trainer.global_step}，"
+              f"数据游标={trainer._cursor}）")
+
+    print(f"{config_path.name}  |  {type(trainer).__name__}")
+    # 数据集的身份要打出来：provides 里有没有 preference，就是 DPO 能被装配
+    # 出来的依据。成对数据的「组大小=2」也在这里 —— 它决定了 mini-batch 的切法。
+    print(f"  {trainer.dataset.describe()}")
+    print(f"  每步取 {trainer.dataset.batch_size} 个样本"
+          f"（= {trainer.dataset.batch_size * trainer.dataset.group_size} 行）")
+    print(f"  损失项：{[(t.name(), w) for t, w in trainer.loss_terms]}")
+    print("-" * 62)
+
+    every = args.every or 1
+    history: list[float] = []
+    for step in range(1, args.steps + 1):
+        metrics = trainer.train_step()
+        history.append(metrics["train/loss"])
+        if step % every == 0 or step == args.steps:
+            print(
+                f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "
+                f"grad_norm={metrics.get('train/grad_norm', float('nan')):>8.4f}  "
+                f"游标={trainer._cursor}"
+            )
+
+    # 数据集自报的丢弃计数：一条都不丢是理想情况，丢了很多而不说才是问题。
+    dropped = trainer.dataset.metrics()
+    if dropped:
+        print("-" * 62)
+        print("数据集丢弃：")
+        for key, value in sorted(dropped.items()):
+            print(f"  {key} = {int(value)}")
+
+    print("-" * 62)
+    print(
+        f"跑完 {args.steps} 步：loss {history[0]:.4f} -> {history[-1]:.4f}"
+        f"（首末两点，含采样噪声，看趋势请看完整输出）"
+    )
+
+    if args.save_dir is not None:
+        path = trainer.save_checkpoint(
+            str(Path(args.save_dir) / f"step_{trainer.global_step}")
+        )
+        print(f"checkpoint 已存到 {path}")
+
+    trainer.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

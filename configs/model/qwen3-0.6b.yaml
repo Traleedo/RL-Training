@@ -1,0 +1,45 @@
+# 基座：Qwen3-0.6B。真实模型的示例，本机跑不了（见 README 的「未验证」一节）。
+#
+# 与 model/fixture.yaml 的差别只有 type 与 name_or_path —— 算法配置一个字不用改。
+# 这就是「算法只看见 Batch，看不见模型」这句话在配置层的收益。
+#
+# 本机没验证过：torchvision 与 torch 的 ABI 不匹配，transformers 的懒加载
+# 会连带 import 到它。到 Linux 上再验。
+
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+  attn_implementation: flash_attention_2   # 没装 flash-attn 就删掉这一行
+  trust_remote_code: false
+  local_files_only: false
+
+actor:
+  type: hf_causal_lm
+
+# 共享骨架的 critic：从 actor 的底座复制一份，接一个 nn.Linear(hidden, 1)。
+# freeze_backbone: false = 骨架与 head 一起训（PPO 标准做法，critic 从策略的
+# 初始权重出发，之后独立演化）。
+critic:
+  type: hf_shared_value
+  freeze_backbone: false
+
+reference:
+  type: hf_frozen
+
+rollout:
+  type: hf
+  max_new_tokens: 512
+  temperature: 1.0
+  top_p: 1.0
+  do_sample: true
+  # generate 之后重新前向算 logprob。别关 —— 关掉会让 ratio 从第一个
+  # mini-batch 起就不等于 1，见 README「rollout_logprobs 为什么不从 scores 里拿」。
+  recompute_logprobs: true
+
+# 奖励模型。算法配置里把 scorer 切成 hf_reward_model 时这一段才会被用上。
+# 换成自己的奖励模型只需改 name_or_path。
+reward_model:
+  name_or_path: Skywork/Skywork-Reward-V2-Qwen3-8B
+  dtype: bfloat16
+  batch_size: 16
+  scale: 1.0

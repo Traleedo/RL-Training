@@ -1,0 +1,58 @@
+# PPO-KL 的 k2 变体。
+#
+# 与 ppo.yaml 的差量是**一个值**：kl_k3 -> kl_k2（有一个测试在守着这条）。
+#
+# kl_k2 = E[½ℓ²]，ℓ = log(π_θ/π_ref)
+# --------------------------------
+# 它是三个估计量里唯一**有偏**的那个，而且偏差不是高阶小量：
+#
+#     E[½ℓ²] = ½(KL² + Var(ℓ))
+#
+# 右边多出来的 ½·Var(ℓ) 会一直留在那里 —— 加样本量不会让它消失（它是偏差，
+# 不是噪声）。所以 kl_k2 收敛到的是一个比真 KL 大的数，除非策略在参考分布
+# 附近几乎不抖动（Var(ℓ) -> 0）。
+#
+# 它也不是没用：½ℓ² 是 KL 的二阶近似，在 KL 很小时与 k3 数值接近，而计算量
+# 最小。但如果拿它去配自适应 KL，请记住 target_kl 是在**这个有偏的量**上定的
+# （见 configs/ppo_adaptive_kl.yaml）。
+#
+# 关于「少了那个 ½」：k2 的 ½ 不是装饰。不加它就是 ½ 的 2 倍 —— 数值上只差
+# 一个常数，但会让 target_kl 的含义和论文里的对不上。
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
+  num_generations: 1
+
+reward:
+  scorer:
+    type: fixture_response_mean
+  processors:
+    # 单采样下组内标准差恒为 0，只能用全局归一化。
+    - type: fixture_global_normalize
+
+algorithm:
+  # GAE 的 requires 里有 rollout_values -> Critic 会被构建。
+  advantage:
+    type: gae
+    gamma: 0.99
+    lam: 0.95
+
+  losses:
+    - type: ppo_clip
+      weight: 1.0
+      clip_eps: 0.2
+
+    - type: value_loss
+      weight: 0.5
+      clip_eps: 0.2
+
+    # 唯一的改动在这里：kl_k3 -> kl_k2。
+    # 它恒非负，且通常**大于**同一步的 kl_k3 —— 两个配置的曲线不可直接比高低。
+    - type: kl_k2
+      weight: 1.0
+      coef: 0.01
+
+  epochs: 2
+  mini_batch_size: 2

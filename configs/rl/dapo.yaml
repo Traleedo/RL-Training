@@ -1,0 +1,84 @@
+# DAPO —— 动态采样 + clip-higher + 全局 token 归约，无 critic。
+#
+# 与 grpo.yaml 的差量是**三个值**：多一个 processor、loss 的两个裁剪界、
+# 以及 coef。三处都不是新代码，都是已有组件上的旋钮。
+#
+# DAPO 的四项改动，以及它们在本框架里各自落在哪
+# -------------------------------------------
+# 1. **动态采样**（丢掉组内奖励全同的组）      -> processor: dynamic_filter
+#    组内奖励全同 -> 优势恒为 0 -> 这一组对梯度没有任何贡献，只是白算一遍。
+#    DAPO 把它丢掉，省算力也去掉纯噪声样本。
+#
+# 2. **clip-higher**（抬高 ratio 上界）        -> loss: clip_eps_high
+#    对称裁剪 [0.8, 1.2] 会同时限制「概率涨」和「概率跌」。而熵塌缩往往从
+#    「低概率 token 的概率涨不上去」开始 —— 下界把它捆住了。把上界抬到 0.28
+#    就是给这条通路松绑。所以是**非对称**裁剪，不是把两边都放宽。
+#
+# 3. **token 级归约**（固定分母）              -> loss: reduction
+#    与 GRPO 的 seq_mean 相对。见 policy_gradient.py 的 reduction 一节。
+#
+# 4. **去掉 KL 惩罚**                          -> loss: coef: 0.0
+#    DAPO 原论文不使用 KL 项。这里保留 kl_k3 那一行但把 coef 置 0，是为了
+#    顺便演示条件依赖：coef == 0 时该项会 release(ref_logprobs)，于是
+#    plan_assembly 判定无人需要参考模型 —— **Reference 不会被构建**。
+#    「配置里写了这一行」不等于「那个模型会被加载」，这就是最直接的例子。
+#
+# ⚠️ 动态采样会丢样本，而丢到空批次是一个**静默**的失败模式
+# ---------------------------------------------------------
+# 如果某个 batch 的组**全部**被丢掉，框架会在进入前向之前显式跳过这一步：
+# 记一条 warning、记 train/skipped_step = 1.0、**不推进 global_step**。
+# 不做这个显式跳过的话，空前向 + NaN 奖励 + 步数照涨 + checkpoint 声称有进展
+# 会一起发生，而其中没有任何一条会报错。
+#
+# 真正的重采样循环**在本框架之外**（在调用方），因为 prompt 的来源是业务侧
+# 的事：跳过之后该做什么（换一批 prompt？重采样同一个 prompt？）不是训练器
+# 能决定的。训练器只负责把「这一步什么都没做」如实报出来。
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  # 动态采样要丢掉一部分组，所以组数留出余量。
+  num_generations: 4
+
+reward:
+  scorer:
+    type: fixture_response_mean
+  processors:
+    # ⚠️ 顺序有意义，而且是被检查的：dynamic_filter 会让 batch 的行数变少
+    # （changes_batch_size = True），它**必须**排在会做统计的 processor 之前。
+    # 反过来的话，即将被丢掉的组会被算进均值和标准差 —— 不会报错，
+    # 只是基线「有点不对」。plan_assembly 会在启动时拦住这种顺序。
+    - type: dynamic_filter
+      eps: 1.0e-6
+    - type: group_normalize
+
+algorithm:
+  advantage:
+    type: broadcast
+
+  losses:
+    # clip-higher：非对称裁剪。写 clip_eps 与写 low/high 是互斥的，
+    # 同时给会在启动时报错（两套参数都在时无法判断哪个生效，而猜错的表现
+    # 是梯度悄悄变了）。
+    - type: policy_gradient
+      weight: 1.0
+      reduction: token_mean
+      clip_eps_low: 0.2
+      clip_eps_high: 0.28
+
+    # DAPO 不用 KL 项。coef: 0.0 会释放对 ref_logprobs 的依赖，
+    # 于是 Reference 模型整个不再加载（这一行还在配置里，只是不生效）。
+    #
+    # 注意 weight: 0.0 与 coef: 0.0 是**两种不同的关法**，选哪个是有讲究的：
+    #   weight: 0.0  -> 这一项在装配阶段就被剔除，compute() 根本不会被调用，
+    #                   它对依赖并集的贡献也一并消失。
+    #   coef:  0.0  -> 这一项**仍在**组合里、每步仍被调用（返回 0），
+    #                   只是释放掉 ref_logprobs 这一个字段。
+    # 这里用 coef 是为了演示后者 —— 「按字段而不是按整项退依赖」是本框架里
+    # 更细的那一层机制，也是 adaptive_kl 的 target 不能从 coef: 0 起步的原因。
+    - type: kl_k3
+      weight: 1.0
+      coef: 0.0
+
+  epochs: 2
+  mini_batch_size: 4

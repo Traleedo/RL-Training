@@ -1,0 +1,67 @@
+# GSPO —— 把 ratio 从「逐 token」改成「逐序列」再裁剪。
+#
+# 与 grpo.yaml 的差量是**一个值**：policy_gradient -> gspo。
+# 优势来源、归一化、组采样全都一样 —— 差异确实只有「裁剪的单位」这一件事。
+#
+# 三个长得像、量级却完全不同的量
+# ----------------------------
+#   r_t = π_θ(a_t)/π_old(a_t)            逐 token ratio        O(1)
+#   R   = Π_t r_t                        未归一化序列权重       O(1)^|y|，随长度爆炸
+#   s   = R^(1/|y|) = exp(mean_t log r_t) 序列比值（几何平均）    O(1) ← GSPO 裁的是它
+#
+# 逐 token 裁剪管不住 R：512 个 token 每个都是 1.01 时，逐个看去全在界内
+# （一个 token 都不会被裁），而 R = 1.01^512 ≈ 163 —— 那个才是乘在序列奖励上的
+# 系数。序列越长，这个缺口越大。
+#
+# 关于这里很小的 clip_eps
+# ----------------------
+# GSPO 论文用 3e-4，看起来比 PPO 的 0.2 苛刻得多，但两者**不在同一个尺度上**：
+# 一个是逐 token 的比值，一个是长度归一化后的序列比值。直接比较两个数字的大小
+# 是没有意义的 —— 换的是被约束的量，不是约束的松紧。
+#
+# ⚠️ 优势必须是序列级的
+# -------------------
+# GSPO 的 A_i 是一条序列一个数。本框架的 advantage 契约统一写 [B, L]，所以
+# gspo 项会按 response_mask 把它还原成 [B]。如果优势本来就是逐 token 的
+# （把这里配成 gae），这个还原会把它压成一个平均值，损失照样算得出来、
+# 曲线照样好看，但优化的目标已经不是 GSPO 了 —— 而且不会报错。
+# 所以 gspo 在运行期检查优势在序列内是否恒定，不恒定就直接报错，而不是静默取均值。
+#
+# 这正是本配置用 broadcast 的原因：broadcast 产出的优势在一条序列的 response
+# token 上取值相同，天然满足这个契约。
+#
+# ``seq_clip_frac`` 与 ``clip_frac`` 不是一回事
+# -------------------------------------------
+# 这一项上报的是 ``seq_clip_frac``（被裁剪的**序列**占比），而 policy_gradient
+# 上报 ``clip_frac``（被裁剪的 **token** 占比）。故意用不同的键名：同一个名字在
+# 两个项里一个按 token 算、一个按序列算，是很容易看错的一类混淆。
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  num_generations: 4
+
+reward:
+  scorer:
+    type: fixture_response_mean
+  processors:
+    - type: group_normalize
+
+algorithm:
+  # broadcast -> 序列级优势，满足 GSPO 的运行期检查。
+  # 配成 gae 会在 compute() 里直接报错，而不是悄悄退化成另一个算法。
+  advantage:
+    type: broadcast
+
+  losses:
+    # 序列级裁剪。clip_eps 用论文量级；它的量纲与 PPO 的 0.2 不同。
+    - type: gspo
+      weight: 1.0
+      clip_eps: 3.0e-4
+
+    - type: kl_k3
+      weight: 1.0
+      coef: 0.01
+
+  epochs: 2
+  mini_batch_size: 4

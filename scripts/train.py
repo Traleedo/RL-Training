@@ -1,0 +1,219 @@
+"""一个入口跑任意配置：强化学习与离线都覆盖。
+
+用法::
+
+    python -X utf8 scripts/train.py -a ppo -m fixture --steps 20
+    python -X utf8 scripts/train.py -a dpo -m fixture --steps 5
+    python -X utf8 scripts/train.py -a dpo --plan
+    python -X utf8 scripts/train.py -a grpo -m qwen3-0.6b --reward-model Skywork/... --steps 100
+
+算法（``-a``）与基座（``-m``）是两条独立的轴：``configs/rl/`` 下只写
+``algorithm`` / ``reward`` / ``rollout``，模型段全在 ``configs/model/`` 下。
+换基座不必改算法配置，反之亦然。
+
+``scripts/train_offline.py`` 保留着 —— 它把「数据游标」讲得更详细。
+这个脚本是它的超集，也是唯一能跑 RL 配置的入口。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+for path in (str(SRC), str(ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+CONFIGS = ROOT / "configs"
+
+#: 由基座配置提供的块。
+MODEL_BLOCKS = ("model", "actor", "critic", "reference", "rollout", "reward_model")
+
+#: 没给 --prompts 时用的内置 prompt。
+DEFAULT_PROMPTS = ["用一个比喻解释梯度下降", "为什么天空是蓝色的", "写一句关于春天的诗"]
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="按配置名训练（RL / 离线）")
+    parser.add_argument("-a", "--algorithm", required=True, help="算法配置名：ppo / grpo / sft / dpo ...")
+    parser.add_argument("-m", "--model", default=None, help="基座配置名，例如 fixture / qwen3-0.6b")
+    parser.add_argument(
+        "--reward-model",
+        default=None,
+        help="覆盖 reward_model.name_or_path，并把 scorer 切成 hf_reward_model",
+    )
+    parser.add_argument("--prompts", default=None, help="RL 的 prompt 文件，每行一个")
+    parser.add_argument("--data", default=None, help="离线配置的数据集路径（覆盖 data.path）")
+    parser.add_argument("--steps", type=int, default=10, help="train_step 的次数")
+    parser.add_argument("--device", default=None, choices=["cpu", "cuda"])
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None, help="覆盖 optim.lr")
+    parser.add_argument("--save-dir", default=None, help="checkpoint 目录")
+    parser.add_argument("--resume", default=None, help="从某个 checkpoint 续跑")
+    parser.add_argument("--every", type=int, default=1, help="每 N 步打印一次指标")
+    parser.add_argument("--set", action="append", default=[], metavar="K=V", help="任意点号覆盖，可重复")
+    parser.add_argument("--plan", action="store_true", help="只打装配计划，不训练")
+    return parser.parse_args(argv)
+
+
+def _own_of(path: Path):
+    """算法配置**自己**写了什么 —— 去掉 ``defaults`` 之后剩下的部分。
+
+    换基座时不能简单地把新基座 merge 到已经展开好的配置上：那样旧基座
+    （fixture）的 ``vocab_size`` 之类会留下来，被 ``build()`` 原样当成构造
+    参数传给 ``hf_causal_lm``，报一个与真正原因无关的 TypeError。
+
+    所以改成「配方」而不是「覆写」：``base + 选中的基座 + 算法自己的增量``。
+    """
+    from omegaconf import OmegaConf
+
+    raw = OmegaConf.load(path)
+    defaults = raw.get("defaults", None)
+    if defaults is None or len(defaults) != 2 or "model" not in str(defaults[1]):
+        raise ValueError(
+            f"{path.name} 的 defaults 不是「base + 一个基座」的形状"
+            f"（实际是 {defaults}），--model 无法安全地替换基座。\n"
+            f"请手动编辑该文件的 defaults，或去掉 -m。"
+        )
+    own = OmegaConf.to_container(raw, resolve=False)
+    own.pop("defaults", None)
+    return OmegaConf.create(own)
+
+
+def load_config_with_model(algorithm: str, model: str | None):
+    """按算法 + 基座组装配置。``model`` 为 None 时用配置自己的默认链。"""
+    from omegaconf import OmegaConf
+
+    from core.config import find_config, load_config
+
+    algorithm_path = find_config(algorithm, CONFIGS)
+    if model is None:
+        return load_config(algorithm_path), algorithm_path
+
+    model_path = find_config(f"model/{model}", CONFIGS)
+
+    cfg = OmegaConf.merge(
+        load_config(CONFIGS / "base.yaml"),
+        load_config(model_path),
+        _own_of(algorithm_path),
+    )
+    return cfg, algorithm_path
+
+
+def read_prompts(path: str | None) -> list[str]:
+    if path is None:
+        return list(DEFAULT_PROMPTS)
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    prompts = [line.strip() for line in lines if line.strip()]
+    if not prompts:
+        raise SystemExit(f"{path} 里没有非空行 —— prompt 列表是空的。")
+    return prompts
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.steps < 1:
+        print("--steps 必须 >= 1", file=sys.stderr)
+        return 2
+
+    # 配置解析放在 import torch 之前，路径写错的失败因此是瞬时的。
+    try:
+        cfg, algorithm_path = load_config_with_model(args.algorithm, args.model)
+    except FileNotFoundError as exc:
+        print(f"找不到配置：{exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"配置无法合并：{exc}", file=sys.stderr)
+        return 2
+
+    from omegaconf import OmegaConf
+
+    if args.reward_model:
+        # 基座配置里通常已经有 reward_model 段；没有就现建一个，
+        # 免得在一个自定义基座上直接 ConfigAttributeError。
+        if "reward_model" not in cfg:
+            cfg.reward_model = OmegaConf.create(
+                {"dtype": "bfloat16", "batch_size": 16, "scale": 1.0}
+            )
+        cfg.reward_model.name_or_path = args.reward_model
+        cfg.reward.scorer.type = "hf_reward_model"
+    if args.data is not None:
+        if "data" not in cfg:
+            print(
+                f"--data 只对离线配置有意义，而 {algorithm_path.name} 没有 data 块。",
+                file=sys.stderr,
+            )
+            return 2
+        cfg.data.path = args.data
+    if args.device is not None:
+        cfg.trainer.device = args.device
+    if args.seed is not None:
+        cfg.trainer.seed = args.seed
+    if args.lr is not None:
+        cfg.optim.lr = args.lr
+    if args.save_dir is not None:
+        cfg.checkpointer.save_dir = args.save_dir
+    if args.set:
+        try:
+            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.set))
+        except Exception as exc:  # noqa: BLE001 — 原样转述给用户
+            print(f"--set 解析失败：{exc}", file=sys.stderr)
+            return 2
+    # 调度器的 horizon 要与真实步数一致，否则 cosine/linear 会算错终点。
+    cfg.trainer.total_steps = args.steps
+
+    import components  # noqa: F401  触发真实组件注册
+    import data  # noqa: F401  触发数据集注册
+    import tests.fixtures  # noqa: F401  触发 fixture 组件注册
+
+    from engine.build import build_trainer
+
+    trainer = build_trainer(cfg)
+    kind = str(cfg.trainer.get("kind", "rl")).lower()
+
+    print(f"{algorithm_path.name}  |  {type(trainer).__name__}（kind={kind}）")
+    print(f"  基座：{cfg.model.name_or_path}（actor={cfg.actor.type}，critic={cfg.critic.type}）")
+    print(trainer.plan.describe())
+    if hasattr(trainer, "dataset"):
+        print(f"  {trainer.dataset.describe()}")
+
+    if args.plan:
+        trainer.close()
+        return 0
+
+    if args.resume:
+        trainer.resume(args.resume)
+        print(f"从 {args.resume} 续跑（global_step={trainer.global_step}）")
+
+    prompts = read_prompts(args.prompts) if kind == "rl" else None
+    if prompts is not None:
+        print(f"  prompt：{len(prompts)} 条")
+    print("-" * 62)
+
+    for step in range(1, args.steps + 1):
+        # RL 的 prompt 由调用方喂进来；离线是数据集在训练器里，train_step 无参数。
+        metrics = trainer.train_step() if kind == "offline" else trainer.train_step(prompts)
+        if metrics.get("train/skipped_step") == 1.0:
+            print(f"step {trainer.global_step:>4}  跳过（批次被过滤空了，不推进步数）")
+            continue
+        if step % args.every == 0 or step == args.steps:
+            print(
+                f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "
+                f"grad_norm={metrics.get('train/grad_norm', float('nan')):>8.4f}"
+            )
+
+    if args.save_dir is not None:
+        path = trainer.save_checkpoint(
+            str(Path(args.save_dir) / f"step_{trainer.global_step}")
+        )
+        print(f"checkpoint 已存到 {path}")
+
+    trainer.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
