@@ -1,0 +1,62 @@
+# Dr.GRPO —— 把 GRPO 里两处「有偏的归一化」都拿掉。
+#
+# 与 grpo.yaml 的差量只有两个值：processor 的 divide_std 与 loss 的 reduction。
+#
+# 论文（Understanding R1-Zero-Like Training: A Critical Perspective）指出 GRPO
+# 的目标函数里藏着两个偏置，两个都不是实现 bug，而是公式本身带来的：
+#
+# 1. **长度偏置** —— 分母用 |o_i| 时，错误的 token 在长回答里被稀释、在短回答
+#    里被放大。于是模型学会的是「回答长短」，而不是「回答对不对」。
+#    对策：不按 |o_i| 归一化。
+#
+# 2. **难度偏置** —— 除以组内 σ 时，奖励方差小的组（难题或简单题）被放大。
+#    于是模型偏向那些「组内差异大」的题，而不是「值得学」的题。
+#    对策：divide_std: false（只减均值，保留难度信息）。
+#
+# 本框架的表达方式
+# --------------
+# 偏置 2 在 processor 上（divide_std: false），偏置 1 在 loss 的 reduction 上。
+# 两处都不需要新代码 —— 这正是「换算法 = 改配置」在这里成立的原因。
+#
+# 诚实说明
+# --------
+# 各实现对 Dr.GRPO 的复现细节有出入。本仓库的 reduction 选 seq_sum 来表达
+# 「不按长度归一化」；严格复刻论文的固定除数（最大生成长度 L_max）与 seq_sum
+# 只差一个 **1/L_max 的常数因子** —— 常数因子等价于缩放有效学习率，用
+# optim.lr 吸收即可，不必再加一个 divisor 旋钮。
+#
+# （顺带一个容易被忽略的事实：seq_sum 与 token_mean 之间差的才是**逐批次**
+# 的标量 (1/B)·Σ|o_i|，两者梯度方向完全相同。所以 Dr.GRPO 在「固定除数」
+# 上选哪个写法是等价的，真正改变权重分配的只有 seq_mean。）
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  num_generations: 4
+
+reward:
+  scorer:
+    type: fixture_response_mean
+  processors:
+    # 与 grpo.yaml 的差别之一：去掉 σ 归一化，只保留减均值。
+    # 注意 normalizes_rewards 在 divide_std: false 时**仍然是 True** ——
+    # 减均值本身就是归一化，所以「两处都归一化」的冲突检查照常生效。
+    - type: group_normalize
+      divide_std: false
+
+algorithm:
+  advantage:
+    type: broadcast
+
+  losses:
+    # 与 grpo.yaml 的差别之二：不按 |o_i| 归一化。
+    - type: policy_gradient
+      weight: 1.0
+      reduction: seq_sum
+
+    - type: kl_k3
+      weight: 1.0
+      coef: 0.01
+
+  epochs: 2
+  mini_batch_size: 4

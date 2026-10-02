@@ -1,0 +1,58 @@
+# PPO-KL 的 k1 变体。
+#
+# 与 ppo.yaml 的差量是**一个值**：kl_k3 -> kl_k1（有一个测试在守着这条）。
+#
+# 三个 KL 估计量（Schulman 2020；记 ℓ = log(π_θ/π_ref)，r = π_ref/π_θ = e^(−ℓ)）
+# ---------------------------------------------------------------------------
+#   kl_k1 = E[ℓ]                     无偏，但样本均值**可正可负**，期望为 0
+#   kl_k2 = E[½ℓ²]                   有偏：E[½ℓ²] = ½(KL² + Var(ℓ))，恒非负
+#   kl_k3 = E[r − 1 − log r]         无偏且恒非负（ppo.yaml 用的就是这个）
+#
+# 为什么 ppo.yaml 默认用 k3 而不是这里更朴素的 k1
+# --------------------------------------------
+# k1 作为**估计量**没问题（无偏）。作为**惩罚项**它有一个要命的性质：
+# 它可以是负的。某一步的样本均值掉到 0 以下时，这一项会把策略往反方向推，
+# 而监控曲线上「KL 惩罚为负」和「KL 惩罚很小」长得一模一样。
+# k3 恒非负，所以 loss/kl_k1 下跌**不一定**意味着 KL 变小了 —— 读曲线时要留意。
+#
+# 什么时候选 k1：需要严格无偏的 KL 估计来做分析或做自适应控制时。
+# 注意自适应 KL 的 target_kl 必须随估计量重设，三个量的数值不可比
+# （见 configs/ppo_adaptive_kl.yaml 的注释）。
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
+  num_generations: 1
+
+reward:
+  scorer:
+    type: fixture_response_mean
+  processors:
+    # 单采样下组内标准差恒为 0，只能用全局归一化。
+    - type: fixture_global_normalize
+
+algorithm:
+  # GAE 的 requires 里有 rollout_values -> Critic 会被构建。
+  advantage:
+    type: gae
+    gamma: 0.99
+    lam: 0.95
+
+  losses:
+    - type: ppo_clip
+      weight: 1.0
+      clip_eps: 0.2
+
+    - type: value_loss
+      weight: 0.5
+      clip_eps: 0.2
+
+    # 唯一的改动在这里：kl_k3 -> kl_k1。
+    # coef 是 β；kl_k1 可为负，所以 loss/kl_k1 的值也可能是负的。
+    - type: kl_k1
+      weight: 1.0
+      coef: 0.01
+
+  epochs: 2
+  mini_batch_size: 2

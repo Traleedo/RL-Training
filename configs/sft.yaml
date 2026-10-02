@@ -1,0 +1,45 @@
+# SFT —— 监督微调。离线家族的第一个成员。
+#
+# 与 configs/ 下八个 RL 配置的差别，最值得看的是**没有什么**：
+#
+#   * 没有 rollout（不用生成）
+#   * 没有 reward（没有奖励模型，也就没有打分与优势两个相位）
+#   * 没有 critic（没有优势，就没有价值函数）
+#   * 没有 reference（交叉熵不需要参考策略）
+#
+# 后两条不是「写了但没用上」—— 数一下 model/fixture.yaml 里 critic / reference 那两段
+# 还在，而 plan_assembly 会推导出它们**根本不会被构建**。这就是「换算法 = 改
+# YAML」在第二个算法家族里的样子。
+#
+# reward 那一段则是真的不能留：离线家族不跑打分相位，一个写着
+# `requires: {rewards}` 的损失项会在装配时就报「没人能提供 rewards」。
+
+defaults: [base, model/fixture]
+
+# trainer.kind 决定 build_trainer 构造哪个训练器。默认是 rl。
+trainer:
+  kind: offline
+  run_name: sft
+
+data:
+  # 真实使用换成 jsonl_sft 并填一个真实路径；fixture 版把数据写在内存里。
+  type: fixture_jsonl_sft
+  path: memory://sft
+  # 一个**样本**的大小。SFT 里 1 样本 = 1 行，所以它就是行数。
+  # （DPO 里 1 样本 = 1 对 = 2 行，见 dpo.yaml 的说明。）
+  batch_size: 4
+  shuffle: true
+
+algorithm:
+  losses:
+    # 就是负对数似然。它是本仓库唯一一个**不需要**任何强化信号的损失项：
+    # requires 只有 curr_logprobs 与 response_mask。
+    - type: cross_entropy
+      weight: 1.0
+      reduction: token_mean
+
+  # 同一个 batch 过几遍。注意与 RL 侧含义相同（那里是「同一批 rollout 数据
+  # 复用几遍」）—— 数据集过几遍是**调用方**的事，不是这个键的事。
+  epochs: 2
+  # 行数。SFT 每行独立，随便切。
+  mini_batch_size: 4

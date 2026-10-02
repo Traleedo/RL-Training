@@ -1,0 +1,51 @@
+# GRPO —— 组内相对优势，无 critic。
+#
+# 与 ppo.yaml 的差量只有 algorithm / reward / rollout 三块（有一个测试在守着）：
+# 三块里没有一个字提到「训练循环」。这就是「换算法 = 改 YAML」的全部机关。
+#
+# 关键观察：advantage 用的是 broadcast，它的 requires 里**没有** values，
+# 于是 plan_assembly 推导出「不需要 Critic」，model/fixture.yaml 里 critic 那段配置
+# 虽然还在，Critic 却根本不会被构建。
+
+defaults: [../base, ../model/fixture]
+
+rollout:
+  # 组采样：每个 prompt 采样 4 条，组内比较得到一个相对优势。
+  # 这个数是算法签名的一部分 —— 换成 1 就退化成「没有基线」了。
+  num_generations: 4
+
+reward:
+  # 奖励入口唯一：Scorer 产出 rewards，之后由 processor 链加工。
+  scorer:
+    type: fixture_response_mean
+  processors:
+    # 组内 (r − μ) / σ。GRPO 的归一化归属**唯一归 processor** ——
+    # 如果某个 advantage 自己也做归一化（assumes_normalized_rewards=True），
+    # 两者会被 plan_assembly 判为冲突并在启动时报错，而不是悄悄归一化两次
+    # 把优势压成噪声级。
+    - type: group_normalize
+
+algorithm:
+  # broadcast 的 requires 里没有 rollout_values -> 不构建 Critic。
+  advantage:
+    type: broadcast
+
+  losses:
+    # GRPO 的策略梯度：**不裁剪**，且每条序列等权。
+    #
+    # 不裁剪是 GRPO 原论文的选择 —— 组内归一化已经提供了约束，再叠加 ratio
+    # 裁剪属于另一套动机（PPO 的 off-policy 修正）。
+    # reduction 的默认值就是 seq_mean，这里显式写出来是因为它正是 GRPO 与
+    # DAPO 的关键分歧点，藏在默认值里会让人找不到。
+    - type: policy_gradient
+      weight: 1.0
+      reduction: seq_mean
+
+    # KL 锚。需要 ref_logprobs -> Reference 模型会被构建。
+    # 删掉这一行（或把 coef 置 0），Reference 就不再加载。
+    - type: kl_k3
+      weight: 1.0
+      coef: 0.01
+
+  epochs: 2
+  mini_batch_size: 4

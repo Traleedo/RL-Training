@@ -1,0 +1,47 @@
+# DPO —— 直接偏好优化。
+#
+# 与 sft.yaml 的差别只有三处：数据成对、损失换了、mini_batch_size 变成偶数。
+# **没有**任何一处是在说「这次要构建 Reference」—— 那是推导出来的。
+#
+#   数据集的 provides 里有 `preference`
+#     + dpo 的 requires 里有 `ref_logprobs`
+#         => Reference 被构建
+#
+# sft.yaml 做不到这一点，因为 cross_entropy 不 require ref_logprobs。
+# 两个 YAML 里都没有 reference 那一行 —— 它是 model/fixture.yaml 提供的，一直挂着，
+# 构不构建由损失项说了算。这就是「条件依赖」在第二个算法上的样子。
+
+defaults: [base, model/fixture]
+
+trainer:
+  kind: offline
+  run_name: dpo
+
+data:
+  # 成对数据的后端。一条样本 = 一对 = 2 行（chosen 先、rejected 后）。
+  type: fixture_jsonl_preference
+  path: memory://preference
+  batch_size: 4          # 4 **对** = 8 行
+  shuffle: true
+
+algorithm:
+  losses:
+    - type: dpo
+      # 组合权重：这一项在总损失里占多少。DPO 通常是唯一的项，取 1.0。
+      weight: 1.0
+      # 下面两个是 DPOLoss 自己的参数，与 weight **没有关系**：
+      #
+      #   beta             sigmoid 内部的温度。越大 -> 越不容忍偏离参考模型。
+      #                    0.1 是论文默认值；调小相当于「允许走得更远」。
+      #   label_smoothing  把标签从 hard 0/1 软化，抗噪声偏好。默认 0 即可。
+      #
+      # 把 beta 写成 0.01 是「允许偏离参考模型很多」，
+      # 把 weight 写成 0.01 是「这一项只占 1% 的梯度」—— 后者看起来像学习率太小，
+      # 而实际上是把目标函数改掉了。
+      beta: 0.1
+      label_smoothing: 0.0
+
+  epochs: 2
+  # 行数，必须是 2 的整数倍（组大小）。DPO 声明了 needs_intact_groups，
+  # 切出半个对会在 compute() 里报错 —— 与其在训练时报，不如在启动时就报。
+  mini_batch_size: 4

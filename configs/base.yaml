@@ -1,0 +1,40 @@
+# 框架公共配置 —— 只剩下与「用哪个模型」「用哪个算法」都无关的部分。
+#
+# 模型段在 configs/model/ 下，算法段在 configs/rl/ 下（sft / dpo 留在根目录）。
+# 一个算法配置同时继承这两个：
+#
+#   configs/rl/ppo.yaml  →  defaults: [../base, ../model/fixture]
+#
+# 于是「换基座」是改 defaults 的第一项或脚本传 -m，「换算法」是改 algorithm /
+# reward / rollout 三块 —— 两件事互不干扰，有测试守着。
+#
+# 注意 defaults 的相对路径：load_config 是相对**当前文件所在目录**解析的，
+# 所以在 configs/rl/ 里要写 ../base，而不是 base。
+
+optim:
+  lr: 1.0e-3
+  # critic 用单独的学习率：价值函数通常需要比策略更大的步长。
+  # 两者共用同一个优化器，所以 checkpoint 里只有一份优化器状态。
+  critic_lr: 1.0e-2
+  weight_decay: 0.0
+  grad_clip: 1.0
+  lr_scheduler: constant      # constant / cosine / linear
+
+loggers:
+  - type: console
+    every_n_steps: 1
+
+checkpointer:
+  type: local
+  save_dir: checkpoints/smoke
+  every_n_steps: 0            # 0 = 只手动存；>0 = 每 N 步自动存
+
+trainer:
+  device: cpu
+  total_steps: 10
+  seed: 42
+  run_name: skeleton
+  # 由 engine/build.py 解释：rl = 样本来自策略采样（八相位）；
+  # offline = 样本来自数据集（两相位，见 sft.yaml / dpo.yaml）。
+  # 放在 base 里而不是各配置里，是因为 RL 配置一个都不想写它。
+  kind: rl
