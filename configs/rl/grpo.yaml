@@ -4,10 +4,10 @@
 # 三块里没有一个字提到「训练循环」。这就是「换算法 = 改 YAML」的全部机关。
 #
 # 关键观察：advantage 用的是 broadcast，它的 requires 里**没有** values，
-# 于是 plan_assembly 推导出「不需要 Critic」，model/fixture.yaml 里 critic 那段配置
-# 虽然还在，Critic 却根本不会被构建。
+# 于是 plan_assembly 推导出「不需要 Critic」，model/qwen2.5-1.5b.yaml 里 critic
+# 那段配置虽然还在，Critic 却根本不会被构建 —— 省下一份完整底座。
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   # 组采样：每个 prompt 采样 4 条，组内比较得到一个相对优势。
@@ -17,7 +17,7 @@ rollout:
 reward:
   # 奖励入口唯一：Scorer 产出 rewards，之后由 processor 链加工。
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     # 组内 (r − μ) / σ。GRPO 的归一化归属**唯一归 processor** ——
     # 如果某个 advantage 自己也做归一化（assumes_normalized_rewards=True），

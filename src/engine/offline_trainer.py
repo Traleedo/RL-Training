@@ -12,6 +12,7 @@ from core.batch import Batch
 from core.component import ForwardContext
 from core.registry import build
 from engine.assembly import AssemblyPlan, plan_assembly
+from engine.logic import build_controllers, build_loss_terms
 from engine.trainer import Trainer
 
 __all__ = ["OfflineTrainer"]
@@ -31,23 +32,11 @@ class OfflineTrainer(Trainer):
     def _build_components(self) -> None:
         self.dataset = build("dataset", self.cfg.data)
 
-        self.loss_terms: list[tuple[Any, float]] = []
-        skipped: list[str] = []
-        for node in self.cfg.algorithm.losses:
-            weight = float(node.get("weight", 1.0))
-            if weight == 0.0:
-                skipped.append(str(node.get("type", "?")))
-                continue
-            self.loss_terms.append((build("loss", node), weight))
-        if skipped:
-            logger.info("跳过权重为 0 的损失项：%s", skipped)
-        if not self.loss_terms:
-            raise ValueError("没有任何权重非零的损失项，无法训练。")
-
-        self.controllers = [
-            build("controller", node)
-            for node in self.cfg.algorithm.get("controllers", []) or []
-        ]
+        # 与 RLTrainer 共用 engine/logic.py 的实现，两份循环只有一份。
+        self.loss_terms = build_loss_terms(self.cfg.algorithm.losses)
+        self.controllers = build_controllers(
+            self.cfg.algorithm.get("controllers", []) or []
+        )
 
     def _assemble(self) -> None:
         self.plan: AssemblyPlan = plan_assembly(

@@ -36,14 +36,14 @@
 # 上报 ``clip_frac``（被裁剪的 **token** 占比）。故意用不同的键名：同一个名字在
 # 两个项里一个按 token 算、一个按序列算，是很容易看错的一类混淆。
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   num_generations: 4
 
 reward:
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     - type: group_normalize
 

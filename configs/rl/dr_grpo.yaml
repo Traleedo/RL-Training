@@ -29,14 +29,14 @@
 # 的标量 (1/B)·Σ|o_i|，两者梯度方向完全相同。所以 Dr.GRPO 在「固定除数」
 # 上选哪个写法是等价的，真正改变权重分配的只有 seq_mean。）
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   num_generations: 4
 
 reward:
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     # 与 grpo.yaml 的差别之一：去掉 σ 归一化，只保留减均值。
     # 注意 normalizes_rewards 在 divide_std: false 时**仍然是 True** ——

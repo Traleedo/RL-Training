@@ -1,26 +1,3 @@
-"""数据集抽象 —— 离线家族的「相位 A」。
-
-RL 家族的样本来自策略采样（``rollout.generate`` 写出 ``input_ids`` /
-``response_mask`` / ``rollout_logprobs``）。离线家族的样本来自固定数据集，
-但**对齐方式必须完全相同** —— 所以这里同样走 ``Batch.from_rollout``，
-而不是另写一条 padding 路径。
-
-全仓库只有 ``Batch.from_rollout`` 决定 ``response_mask`` 怎么对齐（prompt 左
-padding、response 右 padding）。第二条路径不会报错，它只会让离线模型的
-``response_mask`` 与 RL 侧的差一列 —— 而差一列的表现是 loss 略微不同，
-不查到最后都以为是别的原因。
-
-为什么必须有分词语料的注入，而不是构造参数
-------------------------------------------
-数据集要在 ``plan_assembly`` **之前**建好（它以 ``extra_components`` 的身份参与
-依赖推导：DPO 的损失项需要 ``ref_logprobs``，而那是 Reference 模型的构建依据）。
-但 tokenizer 来自 actor，actor 在 ``plan_assembly`` **之后**才加载。
-
-所以走 ``bind_tokenizer()`` 注入，与 ``build("rollout", cfg, model=..., tokenizer=...)``
-是同一种做法。注入之前调 ``build_batch`` 会拿到一条明确的错误，而不是
-``AttributeError: 'NoneType' object has no attribute ...``。
-"""
-
 from __future__ import annotations
 
 from abc import abstractmethod

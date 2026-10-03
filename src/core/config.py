@@ -8,6 +8,9 @@ __all__ = [
     "load_config",
     "find_config",
     "iter_algorithm_configs",
+    "resolve_model_config",
+    "assemble_with_model",
+    "own_of",
     "CONFIG_SUBDIRS",
     "ALGORITHM_SUBDIRS",
 ]
@@ -85,6 +88,61 @@ def find_config(name: str, root: str | Path) -> Path:
     raise FileNotFoundError(
         f"找不到配置 {name!r}（在 {root} 下按 {list(CONFIG_SUBDIRS)} 搜索）。\n"
         f"可用的算法配置：{available}"
+    )
+
+
+def resolve_model_config(name: str, root: str | Path) -> Path:
+    """把基座参数解析成配置文件路径。
+
+    两种写法都收：短名（``qwen2.5-1.5b`` → 在 ``configs/model/`` 下找），
+    以及显式路径（``tests/fixtures/model.yaml``）。先按原样试一次，
+    失败再当作短名补 ``model/`` 前缀 —— 无条件拼前缀会让显式路径永远找不到，
+    而本机的冒烟测试正需要指向 tests/ 下那份 fixture 基座。
+    """
+    try:
+        return find_config(name, root)
+    except FileNotFoundError:
+        return find_config(f"model/{name}", root)
+
+
+def own_of(path: str | Path) -> DictConfig:
+    """算法配置**自己**写了什么 —— 去掉 ``defaults`` 之后剩下的部分。
+
+    换基座时不能简单地把新基座 merge 到已经展开好的配置上：那样**旧**基座
+    写下的 ``vocab_size`` 之类的字段会留下来，被 ``build()`` 原样当成构造
+    参数传给 ``hf_causal_lm``，报一个与真正原因无关的 TypeError。
+
+    所以改成「配方」而不是「覆写」：``base + 选中的基座 + 算法自己的增量``。
+    """
+    raw = OmegaConf.load(Path(path))
+    defaults = raw.get("defaults", None)
+    if defaults is None or len(defaults) != 2 or "model" not in str(defaults[1]):
+        raise ValueError(
+            f"{Path(path).name} 的 defaults 不是「base + 一个基座」的形状"
+            f"（实际是 {defaults}），无法安全地替换基座。\n"
+            f"请手动编辑该文件的 defaults，或去掉这个基座参数。"
+        )
+    own = OmegaConf.to_container(raw, resolve=False)
+    own.pop("defaults", None)
+    return OmegaConf.create(own)
+
+
+def assemble_with_model(
+    algorithm_path: str | Path, model_path: str | Path | None, root: str | Path
+) -> DictConfig:
+    """``base + 基座 + 算法自己的增量``。
+
+    ``model_path`` 为 None 时退化成 ``load_config``：算法配置自己的
+    ``defaults`` 链就是答案。两个脚本（train / train_offline）共用这一份，
+    免得「换基座」的语义在两处慢慢分叉。
+    """
+    algorithm_path = Path(algorithm_path)
+    if model_path is None:
+        return load_config(algorithm_path)
+    return OmegaConf.merge(
+        load_config(Path(root) / "base.yaml"),
+        load_config(model_path),
+        own_of(algorithm_path),
     )
 
 

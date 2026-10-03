@@ -34,7 +34,7 @@
 # k1 可为负、k2 有偏偏高、k3 才是通常意义上的 KL。所以把 term 换成 kl_k1
 # 或 kl_k2 时，target_kl 必须一起改，否则控制器会朝一个错误的靶子调节。
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
@@ -42,10 +42,10 @@ rollout:
 
 reward:
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     # 单采样下组内标准差恒为 0，只能用全局归一化。
-    - type: fixture_global_normalize
+    - type: global_normalize
 
 algorithm:
   # GAE 的 requires 里有 rollout_values -> Critic 会被构建。

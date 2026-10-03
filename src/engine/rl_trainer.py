@@ -14,6 +14,7 @@ from core.component import ForwardContext
 from core.registry import build, get
 from core.tensor_ops import masked_mean
 from engine.assembly import AssemblyPlan, plan_assembly
+from engine.logic import build_controllers, build_loss_terms
 from engine.trainer import Trainer
 
 __all__ = ["RLTrainer"]
@@ -49,25 +50,12 @@ class RLTrainer(Trainer):
 
         self.advantage = build("advantage", self.cfg.algorithm.advantage)
 
-        self.loss_terms: list[tuple[Any, float]] = []
-        skipped: list[str] = []
-        for node in self.cfg.algorithm.losses:
-            weight = float(node.get("weight", 1.0))
-            if weight == 0.0:
-                # 零权重项在这里就被剔除，**早于**求依赖并集。
-                # 否则 YAML 里留一行 weight: 0.0 会白白把 Reference 拉起来。
-                skipped.append(str(node.get("type", "?")))
-                continue
-            self.loss_terms.append((build("loss", node), weight))
-        if skipped:
-            logger.info("跳过权重为 0 的损失项：%s", skipped)
-        if not self.loss_terms:
-            raise ValueError("没有任何权重非零的损失项，无法训练。")
-
-        self.controllers = [
-            build("controller", node)
-            for node in self.cfg.algorithm.get("controllers", []) or []
-        ]
+        # 损失项与控制器走 engine/logic.py 的共享实现 —— 离线家族用的是同一个
+        # 函数，两份逐字重复的循环不会各自漂移。
+        self.loss_terms = build_loss_terms(self.cfg.algorithm.losses)
+        self.controllers = build_controllers(
+            self.cfg.algorithm.get("controllers", []) or []
+        )
 
     def _assemble(self) -> None:
         self.plan: AssemblyPlan = plan_assembly(

@@ -19,7 +19,7 @@
 # 注意自适应 KL 的 target_kl 必须随估计量重设，三个量的数值不可比
 # （见 configs/ppo_adaptive_kl.yaml 的注释）。
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
@@ -27,10 +27,10 @@ rollout:
 
 reward:
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     # 单采样下组内标准差恒为 0，只能用全局归一化。
-    - type: fixture_global_normalize
+    - type: global_normalize
 
 algorithm:
   # GAE 的 requires 里有 rollout_values -> Critic 会被构建。

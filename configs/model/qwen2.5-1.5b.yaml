@@ -1,0 +1,63 @@
+# 基座：Qwen2.5-1.5B-Instruct。这是**默认基座** —— configs/rl/ 与 sft/dpo
+# 都指向它。
+#
+# 为什么是 Qwen2.5 而不是 Qwen3：Qwen2.5 是 ``Qwen2ForCausalLM``，只需要
+# ``transformers>=4.37``；Qwen3 的建模类到 4.51 才进主线。而 transformers 5.x
+# 又硬要求 ``torch>=2.5`` —— 服务器上是 torch 2.4.0+cu118，装 5.x 会被直接
+# 判定为「没有 PyTorch」。Qwen2.5 把这条版本死结整个绕开了。
+#
+# 与 qwen2.5-0.5b.yaml 的差别**只有 name_or_path 一行**。这两份配置存在的
+# 意义就是证明「换基座 = 换一个 -m」，算法配置一个字都不用改。
+
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  dtype: bfloat16
+  # sdpa 是 torch>=2.1 自带的高效注意力，任何机器都能跑。flash_attention_2
+  # 更快，但要单独装 flash-attn —— 那东西要现场编译，且对 torch / CUDA 版本
+  # 挑得很，在一个没配好的云服务器上它是第一块绊脚石。确认装好了再换。
+  attn_implementation: sdpa
+  trust_remote_code: false
+  local_files_only: false
+
+actor:
+  type: hf_causal_lm
+
+# 共享骨架的 critic：从 actor 的底座复制一份，接一个 nn.Linear(hidden, 1)。
+# freeze_backbone: false = 骨架与 head 一起训（PPO 标准做法，critic 从策略的
+# 初始权重出发，之后独立演化）。
+#
+# 显存代价要算清楚：这一份是 deepcopy，所以 PPO 运行时是
+# actor + reference + critic 三份完整底座。1.5B 在 bf16 下约 3GB 一份。
+critic:
+  type: hf_shared_value
+  freeze_backbone: false
+
+reference:
+  type: hf_frozen
+
+rollout:
+  type: hf
+  max_new_tokens: 512
+  temperature: 1.0
+  top_p: 1.0
+  do_sample: true
+  # generate 之后重新前向算 logprob。别关 —— 关掉会让 ratio 从第一个
+  # mini-batch 起就不等于 1，见 README「rollout_logprobs 为什么不从 scores 里拿」。
+  recompute_logprobs: true
+
+# 奖励模型。算法配置里把 scorer 切成 hf_reward_model 时这一段才会被用上。
+#
+# 为什么是 Llama-3.1-8B 而不是某个 Qwen2.5 奖励模型：Skywork-Reward-V2 全系
+# 只有 Qwen3 与 Llama-3 两种底座，**没有 Qwen2.5 版**；用 Qwen3 版又会把
+# transformers>=4.51 那条约束拖回来，与本节开头的取舍矛盾。
+#
+# 它是 ``LlamaForSequenceClassification``，正好对上 models/hf_common.py 里
+# load_reward_model 用的 AutoModelForSequenceClassification(num_labels=1)。
+#
+# 注意这是显存大头：bf16 约 16GB。换小的就改 name_or_path（同系列有
+# Llama-3.2-3B），或用命令行 --reward-model 覆盖。
+reward_model:
+  name_or_path: Skywork/Skywork-Reward-V2-Llama-3.1-8B
+  dtype: bfloat16
+  batch_size: 16
+  scale: 1.0

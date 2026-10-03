@@ -1,25 +1,4 @@
-"""跑一个离线配置（SFT / DPO）—— 从数据集取样、训练、存盘、可选续跑。
 
-用法::
-
-    python -X utf8 scripts/train_offline.py --config configs/sft.yaml --steps 5
-    python -X utf8 scripts/train_offline.py --config configs/dpo.yaml --steps 20
-    python -X utf8 scripts/train_offline.py --config dpo --steps 5 --save-dir /tmp/ck
-    python -X utf8 scripts/train_offline.py --config dpo --steps 5 --resume /tmp/ck/step_5
-
-为什么 RL 那边没有对应的脚本
---------------------------
-因为这个脚本有一半在讲一件 RL 侧不存在的事：**数据游标**。
-
-``RLTrainer.train_step(prompts)`` 里「喂哪批 prompt」是调用方的事，训练器不持有
-任何数据状态。离线家族反过来 —— 数据集在训练器里，``train_step()`` 无参数，
-所以「跑到哪儿了」必须由训练器自己记住，并且**存进 checkpoint**。不存的话
-续跑会从数据集开头重训，而那是从 loss 曲线上完全看不出来的偏差。
-
-``--steps`` 指的是 ``train_step`` 的次数，也就是「取几批数据」。数据集过几遍
-是**调用方**的事（这个脚本用 ``--steps`` 来回答），不是 ``algorithm.epochs``
-的事 —— 后者在两个家族里都是「同一个 batch 过几遍」。
-"""
 
 from __future__ import annotations
 
@@ -89,8 +68,6 @@ def main(argv: list[str] | None = None) -> int:
     trainer = build_trainer(cfg)
     kind = str(cfg.trainer.get("kind", "rl")).lower()
     if kind != "offline":
-        # 这个脚本假设 ``train_step()`` 无参数、且训练器持有数据游标。
-        # 换成一个 RL 配置会在这里就停下，而不是跑出一堆看不懂的报错。
         print(
             f"{config_path.name} 的 trainer.kind 是 {kind!r}，不是 'offline'。\n"
             f"这个脚本只跑离线配置（sft / dpo）；RL 配置请用 scripts/verify_e2e.py。",
@@ -104,8 +81,6 @@ def main(argv: list[str] | None = None) -> int:
               f"数据游标={trainer._cursor}）")
 
     print(f"{config_path.name}  |  {type(trainer).__name__}")
-    # 数据集的身份要打出来：provides 里有没有 preference，就是 DPO 能被装配
-    # 出来的依据。成对数据的「组大小=2」也在这里 —— 它决定了 mini-batch 的切法。
     print(f"  {trainer.dataset.describe()}")
     print(f"  每步取 {trainer.dataset.batch_size} 个样本"
           f"（= {trainer.dataset.batch_size * trainer.dataset.group_size} 行）")

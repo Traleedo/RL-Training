@@ -6,16 +6,16 @@
 典型的链长这样::
 
     processors:
-      - {type: kl_shaping, coef: 0.02}    # 需要 ref_logprobs -> 会拉起 Reference 模型
+      - {type: dynamic_filter}            # 会丢样本 -> 必须排在最前面
       - {type: group_normalize}           # GRPO 的组内归一化
-      - {type: length_penalty, coef: 0.001}
+      - {type: global_normalize}          # PPO 的全局归一化（单采样）
 
-写 processor 时注意两件事
+写 processor 时注意三件事
 ------------------------
-1. **用了什么字段就要声明**。``kl_shaping`` 必须声明 ``ref_logprobs``，
-   否则 ``plan_assembly`` 不会加载 Reference 模型，运行期你会拿到 ``None``
-   而不是一个明确的报错。这引出一个反直觉但正确的结论：
-   **奖励处理链上的组件可以决定哪些模型被构建。**
+1. **用了什么字段就要声明**。比如要用 ``ref_logprobs``，就必须在
+   ``requires`` 里写出来，否则 ``plan_assembly`` 不会加载 Reference 模型，
+   运行期你会拿到 ``None`` 而不是一个明确的报错。这引出一个反直觉但正确的
+   结论：**奖励处理链上的组件可以决定哪些模型被构建。**
    启动时打印的装配计划会写明是谁导致了哪个模型被加载。
 
 2. **做了归一化就要自报**：把 ``normalizes_rewards = True`` 写进类属性。
@@ -31,6 +31,11 @@ from __future__ import annotations
 
 # 新增的 processor 在这里 import —— **import 就是注册**。
 from components.processors.dynamic_filter import DynamicFilterProcessor
+from components.processors.global_normalize import GlobalNormalizeProcessor
 from components.processors.group_normalize import GroupNormalizeProcessor
 
-__all__ = ["DynamicFilterProcessor", "GroupNormalizeProcessor"]
+__all__ = [
+    "DynamicFilterProcessor",
+    "GlobalNormalizeProcessor",
+    "GroupNormalizeProcessor",
+]

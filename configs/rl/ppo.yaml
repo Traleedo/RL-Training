@@ -6,12 +6,14 @@
 # 于是 plan_assembly 推导出「需要 Critic」并把它构建出来。
 # 同一个基座、同一个 trainer、同一份训练循环，只是这里多声明了一个依赖。
 #
-# 算法组件在 src/components/ 下（advantage + 三个 loss），
-# 而 actor / critic / reference / rollout / scorer 仍来自 tests/fixtures/ ——
-# 前三者是 HF 封装的替代品（见 README 的「未验证」一节），
-# scorer 是任务相关的，换任务才换它。
+# 这里**全部是真实组件**：算法组件在 src/components/（advantage + 三个 loss），
+# 模型组件在 src/models/（actor / critic / reference / rollout 走 hf_*），
+# scorer 是真实的奖励模型。没有一个是测试夹具。
+#
+# 本文件只声明「结构与旋钮」，基座在 defaults 指向的 model/ 那一份里 ——
+# 换 Qwen2.5 的尺寸只改 -m，这里一个字都不用动。
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
@@ -19,12 +21,12 @@ rollout:
 
 reward:
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     # 单采样下组内标准差恒为 0，只能用全局归一化。
     # 它 normalizes_rewards=True，所以 gae 那边保持 assumes_normalized_rewards
     # 默认的 False —— 两处都做会被 plan_assembly 在启动时判为冲突。
-    - type: fixture_global_normalize
+    - type: global_normalize
 
 algorithm:
   # GAE 的 requires 里有 rollout_values -> Critic 会被构建。

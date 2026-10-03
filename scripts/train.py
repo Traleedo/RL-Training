@@ -1,20 +1,3 @@
-"""一个入口跑任意配置：强化学习与离线都覆盖。
-
-用法::
-
-    python -X utf8 scripts/train.py -a ppo -m fixture --steps 20
-    python -X utf8 scripts/train.py -a dpo -m fixture --steps 5
-    python -X utf8 scripts/train.py -a dpo --plan
-    python -X utf8 scripts/train.py -a grpo -m qwen3-0.6b --reward-model Skywork/... --steps 100
-
-算法（``-a``）与基座（``-m``）是两条独立的轴：``configs/rl/`` 下只写
-``algorithm`` / ``reward`` / ``rollout``，模型段全在 ``configs/model/`` 下。
-换基座不必改算法配置，反之亦然。
-
-``scripts/train_offline.py`` 保留着 —— 它把「数据游标」讲得更详细。
-这个脚本是它的超集，也是唯一能跑 RL 配置的入口。
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -39,7 +22,7 @@ DEFAULT_PROMPTS = ["用一个比喻解释梯度下降", "为什么天空是蓝�
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="按配置名训练（RL / 离线）")
     parser.add_argument("-a", "--algorithm", required=True, help="算法配置名：ppo / grpo / sft / dpo ...")
-    parser.add_argument("-m", "--model", default=None, help="基座配置名，例如 fixture / qwen3-0.6b")
+    parser.add_argument("-m", "--model", default=None, help="基座配置名，例如qwen3-0.6b")
     parser.add_argument(
         "--reward-model",
         default=None,
@@ -60,14 +43,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _own_of(path: Path):
-    """算法配置**自己**写了什么 —— 去掉 ``defaults`` 之后剩下的部分。
-
-    换基座时不能简单地把新基座 merge 到已经展开好的配置上：那样旧基座
-    （fixture）的 ``vocab_size`` 之类会留下来，被 ``build()`` 原样当成构造
-    参数传给 ``hf_causal_lm``，报一个与真正原因无关的 TypeError。
-
-    所以改成「配方」而不是「覆写」：``base + 选中的基座 + 算法自己的增量``。
-    """
     from omegaconf import OmegaConf
 
     raw = OmegaConf.load(path)
@@ -118,8 +93,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.steps < 1:
         print("--steps 必须 >= 1", file=sys.stderr)
         return 2
-
-    # 配置解析放在 import torch 之前，路径写错的失败因此是瞬时的。
     try:
         cfg, algorithm_path = load_config_with_model(args.algorithm, args.model)
     except FileNotFoundError as exc:
@@ -132,8 +105,6 @@ def main(argv: list[str] | None = None) -> int:
     from omegaconf import OmegaConf
 
     if args.reward_model:
-        # 基座配置里通常已经有 reward_model 段；没有就现建一个，
-        # 免得在一个自定义基座上直接 ConfigAttributeError。
         if "reward_model" not in cfg:
             cfg.reward_model = OmegaConf.create(
                 {"dtype": "bfloat16", "batch_size": 16, "scale": 1.0}
@@ -159,16 +130,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.set:
         try:
             cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.set))
-        except Exception as exc:  # noqa: BLE001 — 原样转述给用户
+        except Exception as exc: 
             print(f"--set 解析失败：{exc}", file=sys.stderr)
             return 2
     # 调度器的 horizon 要与真实步数一致，否则 cosine/linear 会算错终点。
     cfg.trainer.total_steps = args.steps
 
-    import components  # noqa: F401  触发真实组件注册
-    import data  # noqa: F401  触发数据集注册
-    import tests.fixtures  # noqa: F401  触发 fixture 组件注册
-
+    import components  
+    import data  
     from engine.build import build_trainer
 
     trainer = build_trainer(cfg)

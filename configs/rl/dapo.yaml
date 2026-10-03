@@ -34,7 +34,7 @@
 # 的事：跳过之后该做什么（换一批 prompt？重采样同一个 prompt？）不是训练器
 # 能决定的。训练器只负责把「这一步什么都没做」如实报出来。
 
-defaults: [../base, ../model/fixture]
+defaults: [../base, ../model/qwen2.5-1.5b]
 
 rollout:
   # 动态采样要丢掉一部分组，所以组数留出余量。
@@ -42,7 +42,7 @@ rollout:
 
 reward:
   scorer:
-    type: fixture_response_mean
+    type: hf_reward_model
   processors:
     # ⚠️ 顺序有意义，而且是被检查的：dynamic_filter 会让 batch 的行数变少
     # （changes_batch_size = True），它**必须**排在会做统计的 processor 之前。

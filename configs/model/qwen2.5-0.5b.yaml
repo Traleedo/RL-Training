@@ -1,0 +1,39 @@
+# 基座：Qwen2.5-0.5B-Instruct —— 与 qwen2.5-1.5b.yaml 的差别**只有
+# name_or_path 一行**。
+#
+# 用途：显存紧、或只想先把整条链路跑通时用。PPO 的三份底座
+# （actor + reference + critic）在 bf16 下各约 1GB，留得下 8B 奖励模型的
+# 余量比 1.5B 那份宽松得多。质量当然弱一档。
+#
+#     python -X utf8 scripts/train.py -a grpo -m qwen2.5-0.5b --device cuda
+
+model:
+  name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+  dtype: bfloat16
+  attn_implementation: sdpa
+  trust_remote_code: false
+  local_files_only: false
+
+actor:
+  type: hf_causal_lm
+
+critic:
+  type: hf_shared_value
+  freeze_backbone: false
+
+reference:
+  type: hf_frozen
+
+rollout:
+  type: hf
+  max_new_tokens: 512
+  temperature: 1.0
+  top_p: 1.0
+  do_sample: true
+  recompute_logprobs: true
+
+reward_model:
+  name_or_path: Skywork/Skywork-Reward-V2-Llama-3.1-8B
+  dtype: bfloat16
+  batch_size: 16
+  scale: 1.0

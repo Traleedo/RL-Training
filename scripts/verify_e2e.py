@@ -115,14 +115,34 @@ def stage1(report: Report) -> None:
 
     import torch
 
-    import tests.fixtures  # noqa: F401 — 触发 fixture 组件注册
+    import components  # noqa: F401 — 触发**真实**组件注册
+    import data  # noqa: F401 — 触发数据集注册
+
+    try:
+        import tests.fixtures  # noqa: F401 — 触发 fixture 组件注册
+    except ImportError:
+        # tests/ 是开发用的、不随仓库分发。这一整个阶段（连同下面整个离线家族）
+        # 都建立在那套微型组件上，缺了它没法跑 —— 干净跳过一条，
+        # 而不是让十几项检查一起报 ModuleNotFoundError。
+        report.record("阶段1", "纯 torch 全链路", SKIP, "tests/fixtures 不存在")
+        return
+
     from core.config import find_config, load_config
+    from engine.logic import plan_from_config
     from engine.rl_trainer import RLTrainer
+    from tests.fixtures.configs import overlay_fixture
 
     names = list(EXPECTED_ASSEMBLY)
+    # 两份配置：configs/ 里那份**原样**的（装配计划只由它决定，且不加载模型），
+    # 以及把四个模型换成微型 fixture 的那份（真跑训练用）。
+    #
+    # 为什么不干脆都用 overlay 版：装配计划是从各组件的 requires / provides 推的，
+    # 而模型组件根本不参与那个推导 —— 拿真实配置算计划，验的才是**要发布的
+    # 那份配置**。overlay 只负责让下面真建模型的步骤不下载十几个 GB。
     configs = {name: load_config(find_config(name, ROOT / "configs")) for name in names}
+    tiny = {name: overlay_fixture(cfg) for name, cfg in configs.items()}
     workdir = Path(tempfile.mkdtemp(prefix="rlt-verify-"))
-    for name, cfg in configs.items():
+    for name, cfg in tiny.items():
         # 别把 checkpoint 写进仓库目录。目录名用配置名而不是 advantage 类型 ——
         # 四个无 critic 的配置共用 broadcast，用类型名会互相覆盖。
         cfg.checkpointer.save_dir = str(workdir / name)
@@ -130,17 +150,25 @@ def stage1(report: Report) -> None:
     for name in names:
         def check_assembly(name=name) -> None:
             want_critic, want_reference, want_controllers = EXPECTED_ASSEMBLY[name]
-            trainer = RLTrainer(configs[name])
 
-            assert trainer.plan.need_critic is want_critic, (
-                f"{name}: plan.need_critic = {trainer.plan.need_critic}，期望 {want_critic}"
+            # 先只看计划：一个字都不加载模型。
+            plan = plan_from_config(configs[name])
+            assert plan.need_critic is want_critic, (
+                f"{name}: plan.need_critic = {plan.need_critic}，期望 {want_critic}"
             )
+            assert plan.need_reference is want_reference, (
+                f"{name}: plan.need_reference = {plan.need_reference}，期望 {want_reference}。"
+                f"{'DAPO 的 kl_k3 是 coef=0，应当释放 ref_logprobs 依赖' if not want_reference else ''}"
+            )
+            assert not plan.conflicts, f"{name}: 计划里有冲突 {plan.conflicts}"
+
+            # 再真的建一遍：这一步证明计划确实被 _assemble() 照做了。
+            trainer = RLTrainer(tiny[name])
             assert (trainer.critic is not None) is want_critic, (
                 f"{name}: Critic 的实际构建情况与装配计划不符"
             )
             assert (trainer.reference is not None) is want_reference, (
-                f"{name}: Reference 的构建情况与期望不符（期望 {want_reference}）。"
-                f"{'DAPO 的 kl_k3 是 coef=0，应当释放 ref_logprobs 依赖' if not want_reference else ''}"
+                f"{name}: Reference 的构建情况与期望不符（期望 {want_reference}）"
             )
             assert len(trainer.controllers) == want_controllers, (
                 f"{name}: 控制器个数是 {len(trainer.controllers)}，期望 {want_controllers}"
@@ -158,9 +186,13 @@ def stage1(report: Report) -> None:
         """
         import torch as _torch
 
-        cfg = load_config(find_config("ppo", ROOT / "configs"))
+        # overlay_fixture 已经把 hf_shared_value 映射成 fixture_tiny_shared_value ——
+        # 这条检查要的正是那个映射，所以不在这里手工再指定一遍类型。
+        cfg = tiny["ppo"]
         cfg.checkpointer.save_dir = str(workdir / "shared-critic")
-        cfg.critic.type = "fixture_tiny_shared_value"
+        assert cfg.critic.type == "fixture_tiny_shared_value", (
+            f"ppo 的 critic 应当被映射成共享骨架的 fixture，实际是 {cfg.critic.type}"
+        )
         trainer = RLTrainer(cfg)
 
         actor_module, critic_module = trainer.actor.module, trainer.critic.module
@@ -192,7 +224,7 @@ def stage1(report: Report) -> None:
 
     trained: dict[str, tuple[RLTrainer, dict, dict]] = {}
 
-    for name, cfg in configs.items():
+    for name, cfg in tiny.items():
         def run(cfg=cfg, name=name) -> None:
             import torch as _torch
 
@@ -249,7 +281,7 @@ def stage1(report: Report) -> None:
         expected_step = trainer.global_step
         path = trainer.save_checkpoint()
 
-        fresh = RLTrainer(configs["grpo"])
+        fresh = RLTrainer(tiny["grpo"])
         fresh.train_step(PROMPTS)                 # 先跑偏，才能证明恢复有效
         fresh.resume(path)
 
@@ -297,7 +329,7 @@ def stage1(report: Report) -> None:
         """
         import copy
 
-        cfg = copy.deepcopy(configs["gspo"])
+        cfg = copy.deepcopy(tiny["gspo"])
         cfg.algorithm.advantage.type = "gae"
         cfg.algorithm.advantage.gamma = 0.99
         cfg.algorithm.advantage.lam = 0.95
@@ -386,9 +418,12 @@ def stage1_offline(report: Report, workdir: Path) -> None:
     from core import interfaces as F
     from engine.build import build_trainer
     from core.config import find_config, load_config
+    from tests.fixtures.configs import overlay_fixture
 
     def config_for(name: str):
-        cfg = load_config(find_config(name, ROOT / "configs"))
+        # 与 RL 家族同样的闸门：actor / reference 换成微型 fixture，
+        # 数据集与损失项保持真实（它们本来就是被验的对象）。
+        cfg = overlay_fixture(load_config(find_config(name, ROOT / "configs")))
         cfg.checkpointer.save_dir = str(workdir / f"offline-{name}")
         return cfg
 

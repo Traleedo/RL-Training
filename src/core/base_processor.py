@@ -6,13 +6,16 @@ Scorer 产出原始分之后、算优势之前，中间会串一条 processor �
 ===================  =========================================================
 实现                 作用
 ===================  =========================================================
-``kl_shaping``       ``r -= coef * Σ(response_logprobs - ref_logprobs)``
-``group_normalize``  GRPO 的组内 ``(r - μ) / σ``
-``advantage_normalize``  PPO 的全局 ``(adv - μ) / σ``
-``length_penalty``   按生成长度扣分
-``format_penalty``   正则不匹配扣分
-``dynamic_filter``   DAPO 的动态采样：标记全对/全错的组为丢弃
+``dynamic_filter``   DAPO 的动态采样：丢掉组内奖励全同的组
+``group_normalize``  GRPO 的组内 ``(r - μ) / σ``（需 ``num_generations >= 2``）
+``global_normalize`` 单采样（PPO 一类）的整批 ``(r - μ) / σ``
 ===================  =========================================================
+
+**这一层能做的是「奖励级」加工，不是「优势级」。** 教科书 PPO 常写
+``(adv - μ) / σ``，但 processor 链跑在 ``advantage.compute()`` **之前**
+（见 ``engine/rl_trainer.py`` 的相位 B 与 D），那一刻 advantages 还不存在。
+想要优势级归一化，只能在 ``AdvantageEstimator`` 里做 —— 做成 processor
+在架构上就够不着。
 
 **关于「归一化归属」这条容易踩的坑**
 
