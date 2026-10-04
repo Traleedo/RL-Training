@@ -1,13 +1,3 @@
-"""基于 HuggingFace transformers 的价值模型封装。
-
-两种 critic，差别只在**权重从哪来**：
-
-    hf_value_head    独立 ``from_pretrained`` 一份自己的模型。
-    hf_shared_value  从 actor 的底座 **复制** 一份，接一个 value head。
-
-后者是 PPO 的标准做法：critic 从策略的初始权重出发（此时它对「哪些 token
-重要」的判断已经比随机初始化好得多），之后两者独立演化。
-"""
 
 from __future__ import annotations
 

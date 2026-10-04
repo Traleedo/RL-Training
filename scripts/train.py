@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 for path in (str(SRC), str(ROOT)):
@@ -31,7 +33,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prompts", default=None, help="RL 的 prompt 文件，每行一个")
     parser.add_argument("--data", default=None, help="离线配置的数据集路径（覆盖 data.path）")
     parser.add_argument("--steps", type=int, default=10, help="train_step 的次数")
-    parser.add_argument("--device", default=None, choices=["cpu", "cuda"])
+    parser.add_argument(
+        "--device",
+        default=None,
+        choices=["auto", "cpu", "cuda"],
+        help="auto（默认）= 有 CUDA 用 CUDA、否则 CPU",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None, help="覆盖 optim.lr")
     parser.add_argument("--save-dir", default=None, help="checkpoint 目录")
@@ -138,20 +145,34 @@ def main(argv: list[str] | None = None) -> int:
 
     import components  
     import data  
+    kind = str(cfg.trainer.get("kind", "rl")).lower()
+
+    if args.plan:
+        # 只看计划：装配计划完全由 processor / advantage / loss / controller
+        # 的 requires 决定，**一个权重都不用加载**。真走 build_trainer 的话，
+        # 会先把 Qwen2.5 和一个 8B 奖励模型下载下来。
+        from engine.logic import build_logic_components
+
+        logic = build_logic_components(cfg)
+        print(f"{algorithm_path.name}  |  "
+              f"{'RLTrainer' if logic.dataset is None else 'OfflineTrainer'}（kind={kind}）")
+        print(f"  基座：{cfg.model.name_or_path}（actor={cfg.actor.type}，"
+              f"critic={cfg.critic.type}）")
+        print(logic.plan.describe())
+        if logic.dataset is not None:
+            print(f"  {logic.dataset.describe()}")
+        print("\n（--plan 只算计划，没有加载任何模型）")
+        return 0
+
     from engine.build import build_trainer
 
     trainer = build_trainer(cfg)
-    kind = str(cfg.trainer.get("kind", "rl")).lower()
 
     print(f"{algorithm_path.name}  |  {type(trainer).__name__}（kind={kind}）")
     print(f"  基座：{cfg.model.name_or_path}（actor={cfg.actor.type}，critic={cfg.critic.type}）")
     print(trainer.plan.describe())
     if hasattr(trainer, "dataset"):
         print(f"  {trainer.dataset.describe()}")
-
-    if args.plan:
-        trainer.close()
-        return 0
 
     if args.resume:
         trainer.resume(args.resume)
@@ -162,14 +183,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  prompt：{len(prompts)} 条")
     print("-" * 62)
 
-    for step in range(1, args.steps + 1):
+    pbar = tqdm(
+        range(1, args.steps + 1),
+        desc=algorithm_path.name,
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in pbar:
         # RL 的 prompt 由调用方喂进来；离线是数据集在训练器里，train_step 无参数。
         metrics = trainer.train_step() if kind == "offline" else trainer.train_step(prompts)
         if metrics.get("train/skipped_step") == 1.0:
-            print(f"step {trainer.global_step:>4}  跳过（批次被过滤空了，不推进步数）")
+            # 被过滤空的步不推进 global_step，进度条上标出来，别当成正常步数
+            pbar.set_postfix_str("skipped")
             continue
+        # 进度条后缀实时刷新最新 loss / grad；global_step 与循环计数可以不同
+        # （跳过不推进步数），所以这里显式带上 global_step。
+        pbar.set_postfix(
+            step=trainer.global_step,
+            loss=f"{metrics['train/loss']:.4f}",
+            grad=f"{metrics.get('train/grad_norm', float('nan')):.4f}",
+        )
+        # 周期性完整行照旧打印（tqdm.write 而不是 print —— 后者会把进度条
+        # 冲成好几行）。进度条负责「现在到哪了」，这些行负责「可回看的记录」。
         if step % args.every == 0 or step == args.steps:
-            print(
+            pbar.write(
                 f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "
                 f"grad_norm={metrics.get('train/grad_norm', float('nan')):>8.4f}"
             )

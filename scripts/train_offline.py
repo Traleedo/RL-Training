@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 for path in (str(SRC), str(ROOT)):
@@ -89,11 +91,25 @@ def main(argv: list[str] | None = None) -> int:
 
     every = args.every or 1
     history: list[float] = []
-    for step in range(1, args.steps + 1):
+    pbar = tqdm(
+        range(1, args.steps + 1),
+        desc=config_path.name,
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in pbar:
         metrics = trainer.train_step()
         history.append(metrics["train/loss"])
+        # 数据游标是离线家族特有的、跨进程存活的状态 —— 放进后缀，一眼看得见
+        # 它是否在推进（不推进就等于一直在训同几行）。
+        pbar.set_postfix(
+            step=trainer.global_step,
+            loss=f"{metrics['train/loss']:.4f}",
+            grad=f"{metrics.get('train/grad_norm', float('nan')):.4f}",
+            cursor=trainer._cursor,
+        )
         if step % every == 0 or step == args.steps:
-            print(
+            pbar.write(
                 f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "
                 f"grad_norm={metrics.get('train/grad_norm', float('nan')):>8.4f}  "
                 f"游标={trainer._cursor}"

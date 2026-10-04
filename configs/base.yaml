@@ -18,7 +18,9 @@ checkpointer:
   every_n_steps: 0            # 0 = 只手动存；>0 = 每 N 步自动存
 
 trainer:
-  device: cpu
+  # auto = 有 CUDA 就用 CUDA，没有就用 CPU。显式写 cuda 而机器上没有会直接报错
+  # （不静默降级 —— 那会让「在 GPU 上跑」悄悄变成「在 CPU 上慢十倍地跑」）。
+  device: auto
   total_steps: 10
   seed: 42
   run_name: skeleton

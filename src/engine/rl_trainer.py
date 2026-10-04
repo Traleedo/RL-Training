@@ -131,6 +131,11 @@ class RLTrainer(Trainer):
     def _build_forward_context(self) -> ForwardContext:
         return ForwardContext(self.actor, self.critic, self.reference, self.device)
 
+    def _device_components(self) -> list[Any]:
+        # scorer 是 RL 家族独有的第四个持有权重的组件（奖励模型，8B）。
+        # 它不参与基类的 actor/critic/reference 三件套，得显式补上。
+        return [*super()._device_components(), self.scorer]
+
     def _train_phase_writers(self) -> list[Any]:
         return [c for c in (self.actor, self.critic) if c]
 

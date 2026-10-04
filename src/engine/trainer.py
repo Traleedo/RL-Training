@@ -32,7 +32,7 @@ class Trainer:
         ensure_components_registered()
 
         self.cfg = config
-        self.device = torch.device(config.trainer.get("device", "cpu"))
+        self.device = self._resolve_device(config.trainer.get("device", "auto"))
         self.seed = int(config.trainer.get("seed", 42))
         self.global_step = 0
         self.controllers: list[Any] = []
@@ -53,6 +53,11 @@ class Trainer:
         # 阶段 2 & 3：依赖并集 -> 模型清单 -> 构建模型
         # ==============================================================
         self._assemble()
+        # 搬到设备放在 **装配之后**，而不是每个组件构建时各自搬：
+        # 一来 hf_shared_value 的 critic 是从 actor 的底座 deepcopy 出来的，
+        # 先搬再 copy 会在显存里同时留下 CPU 与 GPU 两份；二来「哪些组件持有
+        # 权重」这件事只有在装配完成后才完全确定（scorer 之类要子类补进来）。
+        self._to_device()
 
         # ==============================================================
         # 阶段 4：优化器 / 调度器 / 组合器
@@ -85,6 +90,36 @@ class Trainer:
 
     def _validate_domain(self) -> None:
         """子类自己的启动期校验。默认无。"""
+
+    def _device_components(self) -> list[Any]:
+        """装配后需要搬到 ``self.device`` 的组件（持有 ``nn.Module`` 的那些）。
+
+        默认是三个模型。rollout 不必单列：它持有的是 ``actor.module`` 这**同一个
+        对象**（见 RLTrainer._assemble），而 ``nn.Module.to`` 是就地修改。
+        scorer / reference 之类由子类按需补进来。
+        """
+        return [
+            component
+            for name in ("actor", "critic", "reference")
+            if (component := getattr(self, name, None)) is not None
+        ]
+
+    def _to_device(self) -> None:
+        """把所有持有权重的组件搬到 ``self.device``。
+
+        漏掉任何一个都不会当场报错 —— 它会安静地留在 CPU 上，直到某次前向的
+        输入在 CUDA 上、权重在 CPU 上才炸。所以这里在启动时打一行日志，
+        让「模型到底在哪」有据可查。
+        """
+        components = self._device_components()
+        for component in components:
+            component.to(self.device)
+        logger.info(
+            "已把 %d 个组件放到 %s：%s",
+            len(components),
+            self.device,
+            [type(c).__name__ for c in components],
+        )
 
     def _train_phase_writers(self) -> list[Any]:
         """在训练相位写字段的组件（用于校验「被需要的字段有人写」）。"""
@@ -144,6 +179,28 @@ class Trainer:
     # ==================================================================
     # 构建辅助
     # ==================================================================
+    @staticmethod
+    def _resolve_device(name: Any) -> torch.device:
+        """解析 ``trainer.device``。
+
+        ``auto``（默认）/ 空值 → 有 CUDA 就用 CUDA，否则 CPU。显式写 ``cuda``
+        而机器上没有 CUDA 时**直接报错**，不静默降级：那会让「在 GPU 上跑」
+        悄悄变成「在 CPU 上慢十倍地跑」，而 loss 曲线看不出区别。
+        """
+        text = "" if name is None else str(name).strip().lower()
+        if text in ("", "auto"):
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        device = torch.device(text)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"配置要求 device={name!r}，但这台机器上 torch.cuda.is_available() "
+                f"为 False —— 要么是没装 CUDA 版 torch，要么是没有可见的 GPU。\n"
+                f"把 trainer.device 改成 'auto'（有卡用卡、没卡用 CPU），"
+                f"或显式写 'cpu'。"
+            )
+        return device
+
     def _set_seed(self, seed: int) -> None:
         import random
 

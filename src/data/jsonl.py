@@ -1,30 +1,3 @@
-"""JSONL 数据集 —— SFT 与偏好对比两个后端。
-
-两种数据的差别只有**编码什么**与**提供什么**：
-
-===================  =====================  ==============================
-注册名               每行                              一条样本占几行
-===================  =====================  ==============================
-``jsonl_sft``        ``{prompt, response}``             1
-``jsonl_preference`` ``{prompt, chosen, rejected}``     2（chosen + rejected）
-===================  =====================  ==============================
-
-其余（读文件、字段映射、长度过滤、取样顺序）完全共用。
-
-对齐方式
---------
-两个后端都调用 ``Batch.from_rollout`` —— 全仓库唯一决定 ``response_mask``
-对齐方式的地方。**不写第二条 padding 路径**：离线侧的对齐一旦与 RL 侧差一列，
-表现只是 loss 略微不同，查到最后都以为是别的原因。
-
-关于模型对话模板
-----------------
-prompt 走 ``tokenizer.apply_chat_template(..., add_generation_prompt=True)``，
-response 单独编码（``add_special_tokens=False``）。**chosen / rejected 必须与
-actor / reference 用同一个模板** —— 模板不一致不会报错，只会让 π_ref 从一开始
-就与 π_θ 对不上，于是 DPO 的 Δ 里混进一个常数偏移。
-"""
-
 from __future__ import annotations
 
 import json
@@ -174,15 +147,6 @@ class JSONLDataset(BaseDataset):
         return torch.as_tensor(list(ids), dtype=torch.long)
 
     def _too_long(self, *pieces: torch.Tensor) -> bool:
-        """任一段超过 ``max_response_tokens`` 就丢。
-
-        在**编码后**判而不是编码前：字符数不等于 token 数，用字符数剁会把
-        中文/代码样本剁得莫名其妙。
-
-        直接截断是更省事的做法，但那会悄悄改变标签 —— 截掉 response 的后半段之后，
-        SFT 学到的是「话说到一半」，DPO 学到的是「短的那个更好」。丢掉并计数，
-        好过留下一条语义已经变了的样本。
-        """
         if any(piece.numel() > self.max_response_tokens for piece in pieces):
             self.dropped["response 过长"] += 1
             return True

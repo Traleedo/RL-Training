@@ -34,25 +34,40 @@ class HFOutcomeRewardScorer(Scorer):
         self.batch_size = int(batch_size)
         self.scale = float(scale)
 
-        # 需要张量而非仅文本 —— 声明出来，装配阶段才认识这个依赖
-        self.require(F.INPUT_IDS, F.ATTENTION_MASK)
-
     # ------------------------------------------------------------------
     @property
     def module(self):
         return self._model
 
     def score(self, batch: Batch) -> Batch:
-        batch.require(F.INPUT_IDS, F.ATTENTION_MASK, who="HFOutcomeRewardScorer")
+        # 依赖的是**文本**而不是 actor 的 input_ids。基类 Scorer 的 requires
+        # 声明的是 prompt_texts / response_texts，就是为这件事 —— 奖励模型
+        # 几乎必然与 actor 不是同一个词表（Skywork 是 Llama-3.1，actor 是
+        # Qwen2.5）。batch 里的 input_ids 是 actor 的 tokenizer 产出的，
+        # 直接喂给奖励模型的 embedding 会 IndexError: index out of range in self。
+        # 所以必须用奖励模型自己的 tokenizer 把文本重新编码一遍。
+        batch.require(
+            F.PROMPT_TEXTS, F.RESPONSE_TEXTS, who="HFOutcomeRewardScorer"
+        )
         device = next(self._model.parameters()).device
+
+        full_texts = [
+            str(prompt) + str(response)
+            for prompt, response in zip(batch[F.PROMPT_TEXTS], batch[F.RESPONSE_TEXTS])
+        ]
 
         scores: list[torch.Tensor] = []
         with torch.no_grad():
-            for start in range(0, len(batch), self.batch_size):
-                chunk = batch.select(slice(start, start + self.batch_size))
+            for start in range(0, len(full_texts), self.batch_size):
+                encoded = self.tokenizer(
+                    full_texts[start : start + self.batch_size],
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                )
                 outputs = self._model(
-                    input_ids=chunk[F.INPUT_IDS].to(device),
-                    attention_mask=chunk[F.ATTENTION_MASK].to(device),
+                    input_ids=encoded["input_ids"].to(device),
+                    attention_mask=encoded["attention_mask"].to(device),
                 )
                 logits = outputs.logits
                 if logits.dim() > 1:
