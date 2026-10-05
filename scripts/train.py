@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,7 +28,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--reward-model",
         default=None,
-        help="覆盖 reward_model.name_or_path，并把 scorer 切成 hf_reward_model",
+        help="导入预训练好的奖励模型",
     )
     parser.add_argument("--prompts", default=None, help="RL 的 prompt 文件，每行一个")
     parser.add_argument("--data", default=None, help="离线配置的数据集路径（覆盖 data.path）")
@@ -49,40 +49,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _own_of(path: Path):
-    from omegaconf import OmegaConf
-
-    raw = OmegaConf.load(path)
-    defaults = raw.get("defaults", None)
-    if defaults is None or len(defaults) != 2 or "model" not in str(defaults[1]):
-        raise ValueError(
-            f"{path.name} 的 defaults 不是「base + 一个基座」的形状"
-            f"（实际是 {defaults}），--model 无法安全地替换基座。\n"
-            f"请手动编辑该文件的 defaults，或去掉 -m。"
-        )
-    own = OmegaConf.to_container(raw, resolve=False)
-    own.pop("defaults", None)
-    return OmegaConf.create(own)
-
-
 def load_config_with_model(algorithm: str, model: str | None):
-    """按算法 + 基座组装配置。``model`` 为 None 时用配置自己的默认链。"""
-    from omegaconf import OmegaConf
+    """按算法 + 基座组装配置。``model`` 为 None 时用配置自己的默认链。
 
-    from core.config import find_config, load_config
+    合并规则只有一份定义（``core.config.assemble_with_model``），
+    这里只负责把「算法名 / 基座名」解析成路径。
+    """
+
+    from core.config import (
+        assemble_with_model,
+        find_config,
+        load_config,
+        resolve_model_config,
+    )
 
     algorithm_path = find_config(algorithm, CONFIGS)
     if model is None:
         return load_config(algorithm_path), algorithm_path
 
-    model_path = find_config(f"model/{model}", CONFIGS)
-
-    cfg = OmegaConf.merge(
-        load_config(CONFIGS / "base.yaml"),
-        load_config(model_path),
-        _own_of(algorithm_path),
-    )
-    return cfg, algorithm_path
+    model_path = resolve_model_config(model, CONFIGS)
+    return assemble_with_model(algorithm_path, model_path, CONFIGS), algorithm_path
 
 
 def read_prompts(path: str | None) -> list[str]:
@@ -108,8 +94,6 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"配置无法合并：{exc}", file=sys.stderr)
         return 2
-
-    from omegaconf import OmegaConf
 
     if args.reward_model:
         if "reward_model" not in cfg:
@@ -142,15 +126,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     # 调度器的 horizon 要与真实步数一致，否则 cosine/linear 会算错终点。
     cfg.trainer.total_steps = args.steps
-
-    import components  
-    import data  
     kind = str(cfg.trainer.get("kind", "rl")).lower()
 
     if args.plan:
         # 只看计划：装配计划完全由 processor / advantage / loss / controller
         # 的 requires 决定，**一个权重都不用加载**。真走 build_trainer 的话，
         # 会先把 Qwen2.5 和一个 8B 奖励模型下载下来。
+        import components  # noqa: F401  触发真实组件注册
+        import data  # noqa: F401  触发数据集注册（离线配置要用）
+
         from engine.logic import build_logic_components
 
         logic = build_logic_components(cfg)
@@ -190,21 +174,15 @@ def main(argv: list[str] | None = None) -> int:
         dynamic_ncols=True,
     )
     for step in pbar:
-        # RL 的 prompt 由调用方喂进来；离线是数据集在训练器里，train_step 无参数。
         metrics = trainer.train_step() if kind == "offline" else trainer.train_step(prompts)
         if metrics.get("train/skipped_step") == 1.0:
-            # 被过滤空的步不推进 global_step，进度条上标出来，别当成正常步数
             pbar.set_postfix_str("skipped")
             continue
-        # 进度条后缀实时刷新最新 loss / grad；global_step 与循环计数可以不同
-        # （跳过不推进步数），所以这里显式带上 global_step。
         pbar.set_postfix(
             step=trainer.global_step,
             loss=f"{metrics['train/loss']:.4f}",
             grad=f"{metrics.get('train/grad_norm', float('nan')):.4f}",
         )
-        # 周期性完整行照旧打印（tqdm.write 而不是 print —— 后者会把进度条
-        # 冲成好几行）。进度条负责「现在到哪了」，这些行负责「可回看的记录」。
         if step % args.every == 0 or step == args.steps:
             pbar.write(
                 f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "

@@ -18,6 +18,7 @@ for path in (str(SRC), str(ROOT)):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="跑一个离线配置（SFT / DPO）")
     parser.add_argument("--config", required=True, help="配置文件路径")
+    parser.add_argument("-m", "--model", default=None, help="基座配置名，例如qwen2.5-7b")
     parser.add_argument("--steps", type=int, default=10, help="train_step 的次数")
     parser.add_argument(
         "--save-dir",
@@ -58,12 +59,16 @@ def main(argv: list[str] | None = None) -> int:
 
     import components  # noqa: F401  触发真实组件注册
     import data  # noqa: F401  触发数据集注册
-    import tests.fixtures  # noqa: F401  触发 fixture 组件注册
 
     from engine.build import build_trainer
-    from core.config import load_config
+    from core.config import assemble_with_model, load_config, resolve_model_config
 
-    cfg = load_config(config_path)
+    if args.model is None:
+        cfg = load_config(config_path)
+    else:
+        cfg = assemble_with_model(
+            config_path, resolve_model_config(args.model, ROOT / "configs"), ROOT / "configs"
+        )
     if args.save_dir is not None:
         cfg.checkpointer.save_dir = args.save_dir
 

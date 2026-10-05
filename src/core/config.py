@@ -54,15 +54,6 @@ _NOT_AN_ALGORITHM = {"base"}
 
 
 def find_config(name: str, root: str | Path) -> Path:
-    """把一个配置名解析成路径。
-
-    接受三种写法：``ppo``、``rl/ppo``、以及任何存在的显式路径
-    （``configs/rl/ppo.yaml`` 或绝对路径）。搜索顺序见 ``CONFIG_SUBDIRS``。
-
-    放在 engine 里而不是各个脚本里，是因为这套目录约定被 plan / verify_e2e /
-    train / 若干个测试同时需要 —— 各拼一份路径的话，目录一挪就会有脚本静默地
-    找不到配置。
-    """
     root = Path(root)
 
     candidate = Path(name)
@@ -92,13 +83,6 @@ def find_config(name: str, root: str | Path) -> Path:
 
 
 def resolve_model_config(name: str, root: str | Path) -> Path:
-    """把基座参数解析成配置文件路径。
-
-    两种写法都收：短名（``qwen2.5-1.5b`` → 在 ``configs/model/`` 下找），
-    以及显式路径（``tests/fixtures/model.yaml``）。先按原样试一次，
-    失败再当作短名补 ``model/`` 前缀 —— 无条件拼前缀会让显式路径永远找不到，
-    而本机的冒烟测试正需要指向 tests/ 下那份 fixture 基座。
-    """
     try:
         return find_config(name, root)
     except FileNotFoundError:
@@ -106,14 +90,6 @@ def resolve_model_config(name: str, root: str | Path) -> Path:
 
 
 def own_of(path: str | Path) -> DictConfig:
-    """算法配置**自己**写了什么 —— 去掉 ``defaults`` 之后剩下的部分。
-
-    换基座时不能简单地把新基座 merge 到已经展开好的配置上：那样**旧**基座
-    写下的 ``vocab_size`` 之类的字段会留下来，被 ``build()`` 原样当成构造
-    参数传给 ``hf_causal_lm``，报一个与真正原因无关的 TypeError。
-
-    所以改成「配方」而不是「覆写」：``base + 选中的基座 + 算法自己的增量``。
-    """
     raw = OmegaConf.load(Path(path))
     defaults = raw.get("defaults", None)
     if defaults is None or len(defaults) != 2 or "model" not in str(defaults[1]):
@@ -130,12 +106,6 @@ def own_of(path: str | Path) -> DictConfig:
 def assemble_with_model(
     algorithm_path: str | Path, model_path: str | Path | None, root: str | Path
 ) -> DictConfig:
-    """``base + 基座 + 算法自己的增量``。
-
-    ``model_path`` 为 None 时退化成 ``load_config``：算法配置自己的
-    ``defaults`` 链就是答案。两个脚本（train / train_offline）共用这一份，
-    免得「换基座」的语义在两处慢慢分叉。
-    """
     algorithm_path = Path(algorithm_path)
     if model_path is None:
         return load_config(algorithm_path)
@@ -147,11 +117,6 @@ def assemble_with_model(
 
 
 def iter_algorithm_configs(root: str | Path) -> list[Path]:
-    """列出所有**可运行的**算法配置：``configs/rl/*.yaml`` 加 ``configs/*.yaml``。
-
-    排除 ``base.yaml``（公共块，不是算法）与 ``model/``（基座，不是算法）。
-    名字按路径排序，保证遍历顺序稳定。
-    """
     root = Path(root)
     found: list[Path] = []
     for subdir in ALGORITHM_SUBDIRS:

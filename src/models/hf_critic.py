@@ -147,6 +147,23 @@ class HFSharedValueCritic(Critic):
     def module(self) -> nn.Module:
         return self._base
 
+    def to(self, device: Any) -> "HFSharedValueCritic":
+        """必须覆盖：``module`` 只返回 backbone，``value_head`` 是平级的另一个模块。
+
+        跟基类默认实现走会只搬 backbone，把 head 独自留在 CPU 上 —— 直到
+        ``self.value_head(hidden)`` 那一刻才报 device mismatch，而报错指向
+        nn.Linear，离「模块没搬全」这个真正的原因很远。CPU 上跑永远看不出来
+        （两边都是 cpu），只在 cuda 上现身。
+
+        本类里 parameters / named_parameters / state_dict / load_state_dict 都已经
+        显式带上了 value_head，这里只是把最后漏掉的那一个补齐 ——
+        ``module`` 的语义是「对外暴露的骨架」，不等于「全部参数」。
+        """
+        self._base.to(device)
+        if self.value_head is not None:
+            self.value_head.to(device)
+        return self
+
     def forward_values(self, batch: Batch, *, detach: bool = False) -> Batch:
         batch.require(F.INPUT_IDS, F.ATTENTION_MASK, who="HFSharedValueCritic")
         target = F.ROLLOUT_VALUES if detach else F.VALUES

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import data.json  # noqa: F401  触发 json_sft / json_preference 的注册
 import data.jsonl  # noqa: F401  触发 jsonl_sft / jsonl_preference 的注册
 
-__all__ = ["jsonl"]
+__all__ = ["json", "jsonl"]

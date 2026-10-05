@@ -1,7 +1,7 @@
 model:
-  name_or_path: Qwen/Qwen3-0.6B
+  name_or_path: Qwen/Qwen2.5-7B-Instruct
   dtype: bfloat16
-  attn_implementation: flash_attention_2   # 没装 flash-attn 就删掉这一行
+  attn_implementation: sdpa
   trust_remote_code: false
   local_files_only: false
 

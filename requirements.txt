@@ -1,22 +1,20 @@
-# 只给下限，不锁上限 —— 这是个研究原型，锁死版本只会让你在想升级 torch 时
-# 陷入依赖地狱。下面的下限是实际验证过的版本，往上是猜的。
-#
-# 注意：框架核心（core / engine）**不依赖 transformers**。只有
-# src/models/ 那一层需要它，而且它是可替换的 —— 你可以用自己的一套模型封装
-# 完全绕过它。所以想在一个没有 transformers 的环境里跑单测是可行的。
+
 
 torch>=2.0
 numpy>=1.24
+# 训练循环的进度条（scripts/train.py 直接 import）。transformers 也依赖它，
+# 但这里是显式声明，避免「框架代码直接用了某个传递依赖」这种隐性耦合。
+tqdm>=4.64
 
 # **不要装 torchvision / torchaudio。**
 #
-# 本仓库一行都没引用它们（纯文本框架，用不到视觉 / 音频）。但 transformers 5.x
-# 在导入任何建模类时会连带 import transformers.loss -> image_utils ->
+# 本仓库一行都没引用它们（纯文本框架，用不到视觉 / 音频）。但 transformers
+# >=4.51 在导入任何建模类时会连带 import transformers.loss -> image_utils ->
 # torchvision，而那道守卫只看「这个包在不在」（find_spec，不试导入）。于是只要
 # 它装着、且与 torch 版本对不上，**所有**模型都导不进来，报错还完全看不出原因：
 #
 #     RuntimeError: operator torchvision::nms does not exist
-#     ModuleNotFoundError: Could not import module 'Qwen3ForCausalLM'   <- 被裹了一层
+#     ModuleNotFoundError: Could not import module 'Qwen2ForCausalLM'   <- 被裹了一层
 #
 # 典型来源：装过 CUDA 版的 torchvision/torchaudio，之后单独升级了 torch ——
 # 这两个伴生包各自 pin 死了旧 torch 的**精确**版本，于是 ABI 对不上。检查与处理：
@@ -33,8 +31,27 @@ numpy>=1.24
 omegaconf>=2.3
 PyYAML>=6.0
 
-# HF 模型层（可选，见上）。下限 4.40 是最初写这层时的版本；实际在 5.17.0 上
-# 跑通过（verify_e2e 阶段 2 全绿 + 真加载 Qwen3-0.6B）。上面那段 torchvision
-# 的坑是 5.x 才有的 —— 4.x 里 loss 还没有被收成一个会被无条件导入的包。
-transformers>=4.40
+# HF 模型层（可选，见上）。
+#
+# 上限 <5 是**硬的**：transformers 5.x 要求 torch>=2.5，而服务器上是
+# 2.4.0+cu118 —— 装 5.x 会直接报
+#     [transformers] Disabling PyTorch because PyTorch >= 2.5 is required
+#     [transformers] PyTorch was not found.
+# 模型一个都导不进来。
+#
+# 下限 4.37 是 Qwen2.5 的要求（Qwen3 才要 4.51，Qwen2.5 只要 4.37）。
+# 想同时躲开上面那段 torchvision 的链（≥4.51 才有），就落在 4.37–4.50 之间：
+# 判据是 `python -c "import transformers,os;print(os.path.isdir(os.path.join(os.path.dirname(transformers.__file__),'loss')))"`
+# 输出 False（即不存在 transformers/loss/ 这个包）。
+transformers>=4.37,<5
+
+# 下载 fallback（可选）。HuggingFace 拉不到模型时，src/models/hf_common.py 会
+# 自动落到 modelscope 下载同一份权重（见 resolve_model_source）。HF 能直连的
+# 机器不用装；国内网络建议装：
+#
+#     pip install modelscope
+#
+# 默认用同一个 repo id 在两边各试一次；个别模型两边 id 不一样时，在模型配置里
+# 加一行 modelscope_id: <魔搭上的 id> 显式指定。
+# modelscope>=1.9
 

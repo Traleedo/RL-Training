@@ -1,7 +1,7 @@
 model:
-  name_or_path: Qwen/Qwen3-0.6B
+  name_or_path: meta-llama/Llama-3.2-3B-Instruct
   dtype: bfloat16
-  attn_implementation: flash_attention_2   # 没装 flash-attn 就删掉这一行
+  attn_implementation: sdpa
   trust_remote_code: false
   local_files_only: false
 
@@ -24,7 +24,7 @@ rollout:
   recompute_logprobs: true
 
 reward_model:
-  name_or_path: Skywork/Skywork-Reward-V2-Qwen3-8B
+  name_or_path: Skywork/Skywork-Reward-V2-Llama-3.2-3B
   dtype: bfloat16
   batch_size: 16
   scale: 1.0

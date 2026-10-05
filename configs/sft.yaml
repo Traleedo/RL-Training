@@ -1,29 +1,18 @@
-defaults: [base, model/fixture]
-
-# trainer.kind 决定 build_trainer 构造哪个训练器。默认是 rl。
+defaults: [base, model/qwen2.5-1.5b]
 trainer:
   kind: offline
   run_name: sft
 
 data:
-  # 真实使用换成 jsonl_sft 并填一个真实路径；fixture 版把数据写在内存里。
-  type: fixture_jsonl_sft
-  path: memory://sft
-  # 一个**样本**的大小。SFT 里 1 样本 = 1 行，所以它就是行数。
-  # （DPO 里 1 样本 = 1 对 = 2 行，见 dpo.yaml 的说明。）
+  type: jsonl_sft
+  path: data/sft_sample.jsonl
   batch_size: 4
   shuffle: true
 
 algorithm:
   losses:
-    # 就是负对数似然。它是本仓库唯一一个**不需要**任何强化信号的损失项：
-    # requires 只有 curr_logprobs 与 response_mask。
     - type: cross_entropy
       weight: 1.0
       reduction: token_mean
-
-  # 同一个 batch 过几遍。注意与 RL 侧含义相同（那里是「同一批 rollout 数据
-  # 复用几遍」）—— 数据集过几遍是**调用方**的事，不是这个键的事。
   epochs: 2
-  # 行数。SFT 每行独立，随便切。
   mini_batch_size: 4

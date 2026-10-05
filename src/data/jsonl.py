@@ -4,7 +4,7 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 import torch
 
@@ -62,6 +62,25 @@ class JSONLDataset(BaseDataset):
     # ------------------------------------------------------------------
     # 读取与过滤
     # ------------------------------------------------------------------
+    def _iter_rows(self, path: Path) -> Iterator[tuple[str, str, Any]]:
+        """产出 ``(位置标签, 去重键, 已解析对象)``。
+
+        默认按 JSONL 逐行解析。``data/json.py`` 覆写它来读整份 JSON 数组 ——
+        两者只差「怎么把文件切成一堆对象」，去重、过滤、计数全在 ``_load`` 里。
+        """
+        with path.open("r", encoding=self.encoding) as handle:
+            for lineno, line in enumerate(handle, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{path}:{lineno} 不是合法的 JSON：{exc}"
+                    ) from exc
+                yield f"{path}:{lineno}", line, row
+
     def _load(self, path: Path) -> list[dict[str, Any]]:
         if not path.is_file():
             raise FileNotFoundError(
@@ -74,29 +93,19 @@ class JSONLDataset(BaseDataset):
         self.dropped: Counter[str] = Counter()
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        with path.open("r", encoding=self.encoding) as handle:
-            for lineno, line in enumerate(handle, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"{path}:{lineno} 不是合法的 JSON：{exc}"
-                    ) from exc
-                if not isinstance(row, dict):
-                    raise ValueError(
-                        f"{path}:{lineno} 应为 JSON 对象，收到 {type(row).__name__}"
-                    )
-                # 按**原始行文本**去重，不解析语义。重复的样本会以更高的权重
-                # 出现在梯度里，而它的表现只是「训练得比预期更偏」；JSONL 里
-                # 重复行通常是导出脚本写重了，属于该拦下的那类错误。
-                if line in seen:
-                    self.dropped["重复行"] += 1
-                    continue
-                seen.add(line)
-                rows.append(row)
+        for where, dedup_key, row in self._iter_rows(path):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"{where} 应为 JSON 对象，收到 {type(row).__name__}"
+                )
+            # 按**原始文本**去重，不解析语义。重复的样本会以更高的权重
+            # 出现在梯度里，而它的表现只是「训练得比预期更偏」；JSONL 里
+            # 重复行通常是导出脚本写重了，属于该拦下的那类错误。
+            if dedup_key in seen:
+                self.dropped["重复行"] += 1
+                continue
+            seen.add(dedup_key)
+            rows.append(row)
 
         kept = [row for row in rows if self._keep(row)]
         if not kept:

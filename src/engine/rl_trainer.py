@@ -26,19 +26,13 @@ class RLTrainer(Trainer):
     """按配置装配组件，然后跑 RL 训练循环。"""
 
     def _build_components(self) -> None:
-        # ``reward_model:`` 段对 scorer 的作用，与 ``model:`` 段对 actor 的作用
-        # 完全一样 —— 都是「注入一份模型配置」。基座 config 提供 name_or_path，
-        # 算法 config 只声明用不用（reward.scorer.type）。
         scorer_cfg = self.cfg.reward.scorer
         scorer_kwargs: dict[str, Any] = {}
         if str(scorer_cfg.get("type")) == "hf_reward_model":
             reward_model_cfg = self.cfg.get("reward_model", None)
             if not reward_model_cfg or not reward_model_cfg.get("name_or_path"):
                 raise ValueError(
-                    f"reward.scorer.type 是 hf_reward_model，但配置里没有可用的 "
-                    f"reward_model.name_or_path。\n"
-                    f"它应当由基座配置提供（见 configs/model/qwen3-0.6b.yaml "
-                    f"的 reward_model 段），或在命令行用 --reward-model 指定。"
+                    f"reward.scorer.type 是 hf_reward_model，但配置里没有可用的 "    
                 )
             scorer_kwargs["model_config"] = reward_model_cfg
         self.scorer = build("scorer", scorer_cfg, **scorer_kwargs)
@@ -50,8 +44,6 @@ class RLTrainer(Trainer):
 
         self.advantage = build("advantage", self.cfg.algorithm.advantage)
 
-        # 损失项与控制器走 engine/logic.py 的共享实现 —— 离线家族用的是同一个
-        # 函数，两份逐字重复的循环不会各自漂移。
         self.loss_terms = build_loss_terms(self.cfg.algorithm.losses)
         self.controllers = build_controllers(
             self.cfg.algorithm.get("controllers", []) or []
@@ -72,7 +64,6 @@ class RLTrainer(Trainer):
         model_cfg = self.cfg.model
 
         # actor 模型只加载一次，rollout 与 actor 共享同一个对象。
-        # 这是「单机研究原型」场景下的最优解：不浪费显存，无需权重同步。
         self.actor = build("actor", self.cfg.actor, model_config=model_cfg)
         actor_module = self.actor.module
         tokenizer = getattr(self.actor, "tokenizer", None)
@@ -83,8 +74,6 @@ class RLTrainer(Trainer):
 
         if self.plan.need_reference:
             # 默认加载**独立的冻结副本**。共享 actor 权重（关掉 LoRA adapter）
-            # 那种省显存的做法只允许在「actor 冻结、只训 adapter」时使用，
-            # 否则参考策略会随 actor 漂移，KL 惩罚变成自己减自己。
             self.reference = build(
                 "reference", self.cfg.reference, model_config=model_cfg, tokenizer=tokenizer
             )
@@ -94,8 +83,6 @@ class RLTrainer(Trainer):
         if self.plan.need_critic:
             # 「共享骨架」的 critic（hf_shared_value）声明了 needs_actor_backbone，
             # 于是这里把 actor 的底座注进去。沿用已有的「组件声明 -> 框架推导」
-            # 模式（同 RewardProcessor.changes_batch_size、LossTerm.needs_intact_groups），
-            # 不新增配置开关 —— 组件自己在类属性里说清楚要什么。
             kwargs: dict[str, Any] = {}
             if getattr(get("critic", self.cfg.critic.type), "needs_actor_backbone", False):
                 kwargs["backbone"] = actor_module
@@ -158,7 +145,6 @@ class RLTrainer(Trainer):
     def _cfg_hash_payload(self) -> dict[str, Any]:
         """指纹覆盖 algorithm / reward / model 三块。
 
-        ⚠️ 这三块与键名是**历史契约**：改动它们会让全部已有 checkpoint 拒绝加载。
         """
         return {
             "algorithm": self.cfg.algorithm,
@@ -245,21 +231,6 @@ class RLTrainer(Trainer):
                 batch = processor.process(batch)
         batch.require(F.REWARDS, who="train_step 在打分之后")
 
-        # ================= B'. 空批次守卫 =================
-        # 奖励处理链有权丢掉样本（DAPO 的动态采样就会丢掉「组内奖励全同」的组），
-        # 而它有权丢到**一个都不剩**。
-        #
-        # 空批次不会报错，它只是安静地什么都不做：
-        #   - split() 直接 return []（见 core/batch.py），于是 epoch 循环体一次都
-        #     不执行 —— 连循环体里那道「总损失不携带梯度」的断言也不会被触发，
-        #     本该拦住这种情况的那道防线恰好也在循环体内部；
-        #   - _batch_metrics 里的 rewards.mean() 在 0 个元素上算出 NaN；
-        #   - 而 global_step 照常 += 1。
-        # 净效果是：NaN 指标 + 没有梯度 + 步数虚增 + checkpoint 声称有进展。
-        # 这是本仓库最不能接受的失败模式（静默），所以必须在相位 C 之前显式跳过。
-        #
-        # 跳过时刻意**不**推进 global_step、不存盘、不调控制器钩子 ——
-        # 本步什么都没测到，让 β 基于一个 NaN/缺省的 KL 去调整会更糟。
         if len(batch) == 0:
             logger.warning(
                 "本步的批次为空（奖励处理链把全部样本都过滤掉了），跳过这一步，"

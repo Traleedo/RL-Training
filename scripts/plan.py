@@ -100,13 +100,6 @@ def main() -> int:
     import components  # noqa: F401  触发真实组件注册
     import data  # noqa: F401  触发数据集注册（离线家族要用）
 
-    # tests/ 不随仓库分发（开发用）。缺席只意味着 fixture 组件没注册 ——
-    # 而真实配置一个都不引用它们。决不能让这个只读的诊断脚本因此挂掉。
-    try:
-        import tests.fixtures  # noqa: F401  触发 fixture 组件注册
-    except ImportError:
-        pass
-
     for path in targets:
         describe_config(path)
     print()

@@ -1,0 +1,27 @@
+[project]
+name = "rl-training"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "陈楚霖", email = "zxccl123456@outlook.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "modelscope>=1.40.1",
+    "numpy>=1.24",
+    "omegaconf>=2.3",
+    "pyyaml>=6.0",
+    "torch>=2.0",
+    "torchaudio>=2.11.0",
+    "torchvision>=0.29.1",
+    "tqdm>=4.70.1",
+    "transformers>=4.37,<5",
+]
+
+[project.scripts]
+rl-training = "rl_training:main"
+
+[build-system]
+requires = ["uv_build>=0.12.22,<0.13.0"]
+build-backend = "uv_build"

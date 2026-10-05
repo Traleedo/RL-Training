@@ -1,8 +1,6 @@
 
 optim:
   lr: 1.0e-3
-  # critic 用单独的学习率：价值函数通常需要比策略更大的步长。
-  # 两者共用同一个优化器，所以 checkpoint 里只有一份优化器状态。
   critic_lr: 1.0e-2
   weight_decay: 0.0
   grad_clip: 1.0
@@ -18,13 +16,8 @@ checkpointer:
   every_n_steps: 0            # 0 = 只手动存；>0 = 每 N 步自动存
 
 trainer:
-  # auto = 有 CUDA 就用 CUDA，没有就用 CPU。显式写 cuda 而机器上没有会直接报错
-  # （不静默降级 —— 那会让「在 GPU 上跑」悄悄变成「在 CPU 上慢十倍地跑」）。
   device: auto
   total_steps: 10
   seed: 42
   run_name: skeleton
-  # 由 engine/build.py 解释：rl = 样本来自策略采样（八相位）；
-  # offline = 样本来自数据集（两相位，见 sft.yaml / dpo.yaml）。
-  # 放在 base 里而不是各配置里，是因为 RL 配置一个都不想写它。
   kind: rl
