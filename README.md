@@ -41,7 +41,7 @@ configs/rl/<算法>.yaml          算法段：algorithm / reward / rollout
 离线配置在根目录（`sft.yaml` / `dpo.yaml`），所以路径写成 `model/...`；
 RL 配置在子目录，写成 `../model/...`。
 
-一个算法配置同时继承前两者（`defaults: [../base, ../model/qwen2.5-1.5b]`），
+一个算法配置同时继承前两者（`defaults: [../base, ../model/qwen3-0.6b]`），
 所以**换基座不必碰算法配置，反之亦然**：
 
 ```bash
@@ -120,10 +120,11 @@ python scripts/verify_e2e.py --stage 1   # 十个配置各真跑一遍（装配 
 训练：
 
 ```bash
-# 真实基座：离线配置的默认链就是 qwen2.5-1.5b，`sft` / `dpo` 直接跑
-python -X utf8 scripts/train.py -a dpo --steps 20 --save-dir /tmp/dpo
-python -X utf8 scripts/train.py -a dpo --resume /tmp/dpo/step_20      # 续跑
-python -X utf8 scripts/train.py -a grpo -m qwen3-0.6b --steps 100     # 换真基座
+# 真实基座：离线配置的默认链就是 qwen3-0.6b，`sft` / `dpo` 直接跑
+# 不传 --steps 时，步数取配置里的 trainer.total_steps（默认 1000）。
+python -X utf8 scripts/train.py -a dpo --save-dir /tmp/dpo
+python -X utf8 scripts/train.py -a dpo --resume /tmp/dpo/step_1000    # 续跑
+python -X utf8 scripts/train.py -a grpo --steps 100                   # 冒烟：只跑 100 步
 python -X utf8 scripts/train.py -a dpo -m qwen2.5-7b --steps 20       # 换大基座
 python -X utf8 scripts/train.py -a ppo -m qwen3-0.6b \
     --reward-model Skywork/Skywork-Reward-V2-Qwen3-8B                 # 换奖励模型
@@ -137,6 +138,31 @@ python -X utf8 scripts/train.py -a ppo --plan
 （`base + 选中的基座 + 算法自己的增量`），否则旧基座的 `vocab_size` 之类会留下来，
 被 `build()` 原样当成构造参数传给 `hf_causal_lm`。
 `--plan` 只打装配计划、不训练；`--set k=v`（可重复）是最后一道逃生口。
+
+### RL 的 prompt 从哪来
+
+`RLTrainer.train_step(prompts)` 把**整个列表**一次送进 rollout，所以下载来的
+数据集不能整份交给它。`--dataset` 下载后先放进 prompt 池，再按
+`--prompts-per-step`（默认 8）每步取一批；池子走完一轮自动重新洗牌。
+
+```bash
+# 内置别名：UltraFeedback（约 6 万条 instruction）
+python -X utf8 scripts/train.py -a grpo --dataset ultrafeedback
+python -X utf8 scripts/train.py -a grpo --dataset ultrafeedback \
+    --dataset-limit 5000 --prompts-per-step 16
+
+# 任意 HuggingFace dataset repo id（先试 HF，失败自动切 ModelScope）
+python -X utf8 scripts/train.py -a grpo --dataset your-name/your-prompts \
+    --prompt-field question --dataset-split train
+
+# 本地文件（每行一个）；不给 --prompts-per-step 时整份送进 rollout
+python -X utf8 scripts/train.py -a grpo --prompts data/prompts.txt
+```
+
+`--prompts` 与 `--dataset` 二选一。下载这条路径需要 `datasets` 包
+（`pip install datasets`），只用本地文件时不需要；没有外网时也可以只装
+`modelscope` 走镜像。字段名 / split 不匹配会在**下载成功之后**直接报出来，
+并说明该用 `--prompt-field` 还是 `--dataset-split` —— 不会伪装成网络故障。
 
 或者只回答「这个变体会装配出什么」，不训练：
 
@@ -670,17 +696,18 @@ L = -E[ log σ( β (Δ_w − Δ_l) ) ]
 
 ```yaml
 # configs/dpo.yaml（sft.yaml 只差 data.type / data.path 与 losses）
-defaults: [base, model/qwen2.5-1.5b]   # 框架公共 + 基座（路径相对本文件所在目录）
-trainer: {kind: offline, run_name: dpo}
+defaults: [base, model/qwen3-0.6b]   # 框架公共 + 基座（路径相对本文件所在目录）
+optim: {lr: 5.0e-7}                 # DPO 的学习率比 RL 再低一档
+trainer: {kind: offline}
 data:
   type: jsonl_preference
   path: data/preference_sample.jsonl
-  batch_size: 4                    # 4 **对** = 8 行
+  batch_size: 8                     # 8 **对** = 16 行
 algorithm:
   losses:
     - {type: dpo, weight: 1.0, beta: 0.1, label_smoothing: 0.0}
   epochs: 2
-  mini_batch_size: 4               # 行数，必须是 2 的整数倍
+  mini_batch_size: 8                # 行数，必须是 2 的整数倍
 ```
 
 `data.batch_size` 挂在**数据集**上而不是 trainer 上：多大的 batch 装得下，
@@ -743,6 +770,30 @@ class MyComponent(Component):
   `model` 三块，改 `run_name` 不会让 resume 无谓失败。
 - **RNG 四路都要存**（python / numpy / torch / cuda）。少了它们，续跑出来的
   采样序列与不中断时不同，实验不可复现。
+
+### 日志后端：console 与 wandb
+
+`loggers` 是一个列表，所以「控制台 + wandb 同时开」只是 YAML 里多一行
+（见 `configs/base.yaml` 里注释掉的示例）：
+
+```yaml
+loggers:
+  - type: console
+    every_n_steps: 1
+  - type: wandb
+    project: rl-training
+    mode: offline        # 没外网时；也可 export WANDB_MODE=offline
+```
+
+⚠️ **列表是整块替换而不是追加**：OmegaConf 合并时 `loggers` 直接覆盖，
+所以在算法配置里写 `loggers` 会把 base 里的 console 一并丢掉 —— 要两个就
+在同一块里都列出来。
+
+`wandb` 是**可选依赖**：没装、或 `init` 失败（未登录 / 连不上外网）时，
+后端降级为 no-op 并打一条 WARNING，**训练照跑**。日志后端不该有能力让训练挂掉，
+所以 `import wandb` 写在方法体里而不是模块顶层 —— 否则没装时连
+`import components` 都会失败。配置经 `log_config()` 进 wandb 的 hparams，
+`run_name` 从 `trainer.run_name` 兜底，不用在 YAML 里写两遍。
 
 ### 离线数据
 

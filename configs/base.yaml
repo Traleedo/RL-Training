@@ -1,23 +1,45 @@
 
 optim:
-  lr: 1.0e-3
-  critic_lr: 1.0e-2
+  # 全量微调的学习率。1e-6 是 RL（GRPO/PPO）的常用起点；
+  # SFT / DPO 在各自配置里覆写成 1e-5 / 5e-7。
+  # 之前这里是 1e-3 —— 那是 tiny 模型冒烟测试的量级，真实模型会直接训崩。
+  lr: 1.0e-6
+  critic_lr: 1.0e-5
   weight_decay: 0.0
   grad_clip: 1.0
-  lr_scheduler: constant      # constant / cosine / linear
+  lr_scheduler: constant
 
 loggers:
   - type: console
     every_n_steps: 1
 
+  # wandb 默认不开（可选依赖，没装或初始化失败会降级为 no-op）。要开就取消注释：
+  #   pip install wandb
+  #
+  # ⚠️ console 那一行要留着 —— OmegaConf 合并是**整块替换列表**而不是追加，
+  #    在算法配置里写 loggers 会把 base 里的 console 一并丢掉。
+  # 本机没有外网时用 mode: offline（或 export WANDB_MODE=offline），
+  # 跑完再用 wandb sync 上传。
+  #
+  - type: wandb
+    project: rl-training
+    mode: online        # online / offline / disabled
+    every_n_steps: 1
+
 checkpointer:
   type: local
-  save_dir: checkpoints/smoke
-  every_n_steps: 0            # 0 = 只手动存；>0 = 每 N 步自动存
+  # 按 run_name 分目录，避免不同算法互相覆盖（keep_last 会剪掉同目录的旧存档）。
+  # 脚本会在建 trainer 之前把 trainer.run_name 兜底成算法名。
+  save_dir: checkpoints/${trainer.run_name}
+  every_n_steps: 100          # 每 100 步存一次（0 = 从不周期存档）
+  keep_last: 3                # 只留最近 3 个，0.6B 的存档含优化器状态，很占盘
 
 trainer:
   device: auto
-  total_steps: 10
+  # ``--steps`` 不传时用这个值；传了则以命令行参数为准。
+  total_steps: 1000
   seed: 42
-  run_name: skeleton
+  # null 表示「用配置名兜底」：train.py / train_offline.py 会填成算法名
+  # （grpo / dpo / ...）。显式写一个名字则不会被覆盖。
+  run_name: null
   kind: rl

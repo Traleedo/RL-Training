@@ -1,13 +1,17 @@
-defaults: [base, model/qwen2.5-1.5b]
+defaults: [base, model/qwen3-0.6b]
+
+optim:
+  # DPO 对学习率比 SFT 敏感，5e-7 是常用的保守起点。
+  lr: 5.0e-7
 
 trainer:
   kind: offline
-  run_name: dpo
 
 data:
   type: jsonl_preference
   path: data/preference_sample.jsonl
-  batch_size: 4         
+  # 一个样本 = 一个偏好对（chosen + rejected）。8 对就是 16 行。
+  batch_size: 8
   shuffle: true
 
 algorithm:
@@ -18,4 +22,5 @@ algorithm:
       label_smoothing: 0.0
 
   epochs: 2
-  mini_batch_size: 4
+  # 按行切分，必须是 group_size=2 的整数倍（8 = 4 个完整的偏好对）。
+  mini_batch_size: 8

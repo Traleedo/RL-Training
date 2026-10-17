@@ -1,7 +1,9 @@
 model:
   name_or_path: Qwen/Qwen3-0.6B
   dtype: bfloat16
-  attn_implementation: flash_attention_2   # 没装 flash-attn 就删掉这一行
+  # sdpa 是 torch 自带的，任何环境都能跑；装好 flash-attn 后可换成
+  # flash_attention_2 提速。
+  attn_implementation: sdpa
   trust_remote_code: false
   local_files_only: false
 
@@ -26,5 +28,6 @@ rollout:
 reward_model:
   name_or_path: Skywork/Skywork-Reward-V2-Qwen3-8B
   dtype: bfloat16
-  batch_size: 16
+  # 8B 奖励模型单独占 ~16GB；batch 8 在 48GB 卡上与 actor/reference 同驻比较稳。
+  batch_size: 8
   scale: 1.0

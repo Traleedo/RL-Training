@@ -1,11 +1,3 @@
-"""日志后端抽象。
-
-替代了原伪代码里的 ``self.dashboard``（那个对象从未被赋值过）。
-
-支持配置成列表，于是「控制台 + tensorboard + wandb 同时开」只是 YAML 里多一行。
-每个后端只实现 ``log``，其余都是可选钩子。
-"""
-
 from __future__ import annotations
 
 from abc import abstractmethod

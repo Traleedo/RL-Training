@@ -1,72 +1,3 @@
-"""GSPO —— 把 ratio 从「逐 token」改成「逐序列」，再裁一次。
-
-.. math::
-
-    s_i(\\theta) = \\left(\\frac{\\pi_\\theta(y_i|x_i)}{\\pi_{\\text{old}}(y_i|x_i)}\\right)^{1/|y_i|}
-                 = \\exp\\left(\\frac{1}{|y_i|}\\sum_t \\log\\frac{\\pi_\\theta}{\\pi_{\\text{old}}}\\right)
-
-    J = \\mathbb{E}_i\\Big[\\min\\big(s_i A_i,\\ \\mathrm{clip}(s_i, 1-\\epsilon, 1+\\epsilon)\\, A_i\\big)\\Big]
-
-与 ``policy_gradient`` 的本质区别
---------------------------------
-**裁剪的粒度不同，而不是裁剪的幅度不同。**
-
-先把三个量分清楚，它们是三个东西：
-
-===========================  ===============================  ==============================
-量                           定义                             量级
-===========================  ===============================  ==============================
-逐 token ratio ``r_t``       ``π_θ(a_t)/π_old(a_t)``          ``O(1)``
-序列重要性权重 ``R_i``        ``Π_t r_t``                      ``O(1)^{|y_i|}`` —— 随长度爆炸
-序列比值 ``s_i``（本项用）    ``R_i^{1/|y_i|}``（几何平均）     ``O(1)``
-===========================  ===============================  ==============================
-
-逐 token 裁剪（PPO/GRPO/DAPO）把每个 ``r_t`` 各自夹进 ``[1-ε, 1+ε]``。
-它**管不住 ``R_i``**：``|y_i|`` 个 1.01 逐个看去都在界内，而
-``R_i = 1.01^512 ≈ 163`` —— 那个才是乘在序列奖励上的系数。序列越长缺口越大，
-所以 PPO 系在长 response 上会出现「权重已经飞出天际，却没有任何一个 token
-被判为 clipped」。
-
-GSPO 换成对 ``s_i`` 裁剪。``s_i`` 是 ``R_i`` 的**长度归一化**版本，按构造就是
-``O(1)``；把 ``ε`` 放在这个尺度上，一条序列「整体偏了多少」才是被直接约束
-的量。这也解释了 GSPO 论文里 ``ε = 3e-4`` 为什么这么小：它和 PPO 的 ``0.2``
-**不在同一个尺度上**，两者的大小不可直接比较。
-
-代价是 ``clip_frac`` 的含义变了（见下）。
-
-为什么``log_ratio`` 要先按 token 求平均再取 exp
----------------------------------------------
-数学上 ``exp(mean_t log r_t) = (Π_t r_t)^{1/|y_i|}``，即 token ratio 的**几何平均**
-—— 正是 ``s_i`` 的定义。之所以不写成连乘，除了溢出（``R_i`` 在几百个 token 上
-直接变 inf），还有一个更基本的原因：**这里要的就是几何平均，不是连乘**。
-写成连乘得到的 ``R_i`` 是另一个量，不是 GSPO。
-
-三个必须写对的地方
-------------------
-1. **只裁一次，裁的是 ``s_i``。** 若写成对逐 token ratio 裁剪再平均，得到的
-   就是另一个算法 —— 而且它在短 response 上看起来几乎一样，只有在长
-   response 上才暴露。``tests/test_gspo.py`` 用「每个 token 都在界内、
-   序列比值却是 10^50」这个构造把它钉住了。
-
-2. **优势必须是序列级的。** ``A_i`` 在论文里是组内归一化后的奖励，是一个
-   序列一个数。本框架的 ``advantage`` 契约统一写 ``[B, L]``，所以这里用
-   ``response_mask`` 上的按行均值把它还原成 ``[B]``。**如果优势本来就是逐
-   token 的（例如把 advantage 配成了 ``gae``），这个还原会把它压成一个
-   平均值，算法就不是 GSPO 了** —— 而且不会报错。所以本项在运行期检查
-   优势在 response_mask 内是否恒定，不恒定就直接报错。
-
-3. **不要自己 shift。** 同 ``policy_gradient``：``curr_logprobs`` 与
-   ``rollout_logprobs`` 已经逐位置对齐，``gather_token_logprobs`` 是全仓库
-   唯一的 shift 出口。``tests/test_no_manual_shift.py`` 会静态扫描这件事。
-
-``clip_frac`` 的语义与 ``policy_gradient`` 不同
---------------------------------------------
-这里上报的是 ``seq_clip_frac`` —— **被裁剪的序列占比**，不是 token 占比。
-故意用不同的键名：同一个 ``clip_frac`` 在两个项里一个按 token 算、一个按
-序列算，是很容易看错的一类混淆。论文里 GSPO 的 ε 取得很小（量级 3e-4），
-所以这个比例通常远低于 PPO 的 0.05 ~ 0.2。
-"""
-
 from __future__ import annotations
 
 import torch
@@ -110,13 +41,6 @@ class GSPOLoss(LossTerm):
     def sequence_advantage(
         self, advantages: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
-        """把 ``[B, L]`` 的优势还原成 ``[B]``，并拒绝逐 token 的优势。
-
-        拒绝而不是悄悄取均值：GSPO 的 ``A_i`` 是一个序列一个数，而本框架的
-        advantage 契约统一写 ``[B, L]``。把 ``gae`` 那种真正的逐 token 优势
-        平均掉之后，损失仍然算得出来、曲线仍然好看，但优化的目标已经不是
-        GSPO 了 —— 这类「配方对了但料不对」的错必须报出来。
-        """
         seq_advantage = masked_mean(advantages, mask, dim=-1)
         deviation = ((advantages - seq_advantage.unsqueeze(-1)).abs() * mask).max()
         scale = seq_advantage.abs().max().clamp(min=1.0)

@@ -30,9 +30,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="导入预训练好的奖励模型",
     )
-    parser.add_argument("--prompts", default=None, help="RL 的 prompt 文件，每行一个")
+    parser.add_argument(
+        "--prompts",
+        default=None,
+        help="RL 的本地 prompt 文件（每行一个）。与 --dataset 二选一",
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="RL prompt 数据集：内置别名（ultrafeedback）或 HuggingFace repo id。"
+        "先试 HuggingFace，失败再切 ModelScope",
+    )
+    parser.add_argument("--dataset-split", default=None, help="数据集 split（默认 train）")
+    parser.add_argument(
+        "--prompt-field", default=None, help="prompt 字段名（默认 instruction）"
+    )
+    parser.add_argument(
+        "--dataset-limit", type=int, default=None, help="最多取多少条 prompt（默认全取）"
+    )
+    parser.add_argument(
+        "--prompts-per-step",
+        type=int,
+        default=None,
+        help="每步采样多少条 prompt；--dataset 默认 8，--prompts 默认全部",
+    )
     parser.add_argument("--data", default=None, help="离线配置的数据集路径（覆盖 data.path）")
-    parser.add_argument("--steps", type=int, default=10, help="train_step 的次数")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="train_step 的次数（不传则用配置里的 trainer.total_steps）",
+    )
     parser.add_argument(
         "--device",
         default=None,
@@ -71,19 +99,45 @@ def load_config_with_model(algorithm: str, model: str | None):
     return assemble_with_model(algorithm_path, model_path, CONFIGS), algorithm_path
 
 
-def read_prompts(path: str | None) -> list[str]:
-    if path is None:
-        return list(DEFAULT_PROMPTS)
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
-    prompts = [line.strip() for line in lines if line.strip()]
-    if not prompts:
-        raise SystemExit(f"{path} 里没有非空行 —— prompt 列表是空的。")
-    return prompts
+def build_prompt_sampler(args: argparse.Namespace, cfg):
+    """把 ``--prompts`` / ``--dataset`` 解析成一个每步采样的 prompt 池。
+
+    为什么要采样而不是把整份列表交给 trainer：``train_step(prompts)`` 会把
+    **整个列表**一次送进 rollout。下载来的数据集动辄几万条，一次生成会直接
+    OOM —— 「数据集大小」与「每步 batch」必须是两个量。
+    """
+    from data.prompts import PromptSampler, load_prompt_dataset, read_prompt_file
+
+    if args.prompts and args.dataset:
+        raise ValueError("--prompts 与 --dataset 只能二选一")
+
+    if args.dataset:
+        prompts = load_prompt_dataset(
+            args.dataset,
+            split=args.dataset_split,
+            field=args.prompt_field,
+            limit=args.dataset_limit,
+        )
+        # 下载来的池子通常很大；不指定时每步只取 8 条。
+        per_step = args.prompts_per_step or 8
+        source = f"数据集 {args.dataset}"
+    else:
+        prompts = (
+            read_prompt_file(args.prompts) if args.prompts else list(DEFAULT_PROMPTS)
+        )
+        # 本地文件保持旧行为：不传 --prompts-per-step 就整份送进 rollout。
+        per_step = args.prompts_per_step
+        source = args.prompts or "内置示例 prompt"
+
+    sampler = PromptSampler(
+        prompts, per_step=per_step, shuffle=True, seed=int(cfg.trainer.seed)
+    )
+    return source, sampler
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.steps < 1:
+    if args.steps is not None and args.steps < 1:
         print("--steps 必须 >= 1", file=sys.stderr)
         return 2
     try:
@@ -125,15 +179,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--set 解析失败：{exc}", file=sys.stderr)
             return 2
     # 调度器的 horizon 要与真实步数一致，否则 cosine/linear 会算错终点。
-    cfg.trainer.total_steps = args.steps
+    # 不传 --steps 时以配置为准 —— 配置里写 1000 就该跑 1000，而不是退回到
+    # 命令行里某个「冒烟默认值」。
+    if args.steps is not None:
+        cfg.trainer.total_steps = args.steps
+    steps = int(cfg.trainer.total_steps)
+    # run_name 决定 checkpoint 目录（base.yaml 里是 checkpoints/${trainer.run_name}）。
+    # 没显式写名字就用算法名，顺带也给 wandb 一个可读的 run 名。
+    if not cfg.trainer.get("run_name"):
+        cfg.trainer.run_name = algorithm_path.stem
     kind = str(cfg.trainer.get("kind", "rl")).lower()
 
     if args.plan:
-        # 只看计划：装配计划完全由 processor / advantage / loss / controller
-        # 的 requires 决定，**一个权重都不用加载**。真走 build_trainer 的话，
-        # 会先把 Qwen2.5 和一个 8B 奖励模型下载下来。
-        import components  # noqa: F401  触发真实组件注册
-        import data  # noqa: F401  触发数据集注册（离线配置要用）
+        import components  
+        import data  
 
         from engine.logic import build_logic_components
 
@@ -162,19 +221,27 @@ def main(argv: list[str] | None = None) -> int:
         trainer.resume(args.resume)
         print(f"从 {args.resume} 续跑（global_step={trainer.global_step}）")
 
-    prompts = read_prompts(args.prompts) if kind == "rl" else None
-    if prompts is not None:
-        print(f"  prompt：{len(prompts)} 条")
+    prompt_sampler = None
+    if kind == "rl":
+        try:
+            source, prompt_sampler = build_prompt_sampler(args, cfg)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            print(f"prompt 来源不可用：{exc}", file=sys.stderr)
+            return 2
+        print(f"  prompt：{source}，{prompt_sampler.describe()}")
     print("-" * 62)
 
     pbar = tqdm(
-        range(1, args.steps + 1),
+        range(1, steps + 1),
         desc=algorithm_path.name,
         unit="step",
         dynamic_ncols=True,
     )
     for step in pbar:
-        metrics = trainer.train_step() if kind == "offline" else trainer.train_step(prompts)
+        if kind == "offline":
+            metrics = trainer.train_step()
+        else:
+            metrics = trainer.train_step(prompt_sampler.next())
         if metrics.get("train/skipped_step") == 1.0:
             pbar.set_postfix_str("skipped")
             continue
@@ -183,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             loss=f"{metrics['train/loss']:.4f}",
             grad=f"{metrics.get('train/grad_norm', float('nan')):.4f}",
         )
-        if step % args.every == 0 or step == args.steps:
+        if step % args.every == 0 or step == steps:
             pbar.write(
                 f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "
                 f"grad_norm={metrics.get('train/grad_norm', float('nan')):>8.4f}"

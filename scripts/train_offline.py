@@ -19,7 +19,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="跑一个离线配置（SFT / DPO）")
     parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument("-m", "--model", default=None, help="基座配置名，例如qwen2.5-7b")
-    parser.add_argument("--steps", type=int, default=10, help="train_step 的次数")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="train_step 的次数（不传则用配置里的 trainer.total_steps）",
+    )
     parser.add_argument(
         "--save-dir",
         default=None,
@@ -51,7 +56,7 @@ def resolve_config(name: str) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.steps < 1:
+    if args.steps is not None and args.steps < 1:
         print("--steps 必须 >= 1", file=sys.stderr)
         return 2
 
@@ -71,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.save_dir is not None:
         cfg.checkpointer.save_dir = args.save_dir
+    # 与 train.py 同一约定：命令行给了就覆盖，没给就用配置里的值。
+    if args.steps is not None:
+        cfg.trainer.total_steps = args.steps
+    steps = int(cfg.trainer.get("total_steps", 1000))
+    # 与 train.py 同一约定：没写 run_name 就用配置名兜底。
+    if not cfg.trainer.get("run_name"):
+        cfg.trainer.run_name = config_path.stem
 
     trainer = build_trainer(cfg)
     kind = str(cfg.trainer.get("kind", "rl")).lower()
@@ -97,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     every = args.every or 1
     history: list[float] = []
     pbar = tqdm(
-        range(1, args.steps + 1),
+        range(1, steps + 1),
         desc=config_path.name,
         unit="step",
         dynamic_ncols=True,
@@ -113,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             grad=f"{metrics.get('train/grad_norm', float('nan')):.4f}",
             cursor=trainer._cursor,
         )
-        if step % every == 0 or step == args.steps:
+        if step % every == 0 or step == steps:
             pbar.write(
                 f"step {trainer.global_step:>4}  loss={metrics['train/loss']:>9.4f}  "
                 f"grad_norm={metrics.get('train/grad_norm', float('nan')):>8.4f}  "
@@ -130,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("-" * 62)
     print(
-        f"跑完 {args.steps} 步：loss {history[0]:.4f} -> {history[-1]:.4f}"
+        f"跑完 {steps} 步：loss {history[0]:.4f} -> {history[-1]:.4f}"
         f"（首末两点，含采样噪声，看趋势请看完整输出）"
     )
 

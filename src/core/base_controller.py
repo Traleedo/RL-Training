@@ -1,49 +1,3 @@
-"""控制器 —— 每个训练步调整**别处**系数的有状态组件。
-
-为什么需要这个 category
-----------------------
-其它 category 都是「Batch 的纯函数」：读字段、写字段，算法差异体现在写什么。
-但有一类算法机制无法这样表达 —— **它要根据本步的观测反过来调整另一个组件的参数**。
-最典型的是自适应 KL：
-
-.. math::
-
-    \\beta \\leftarrow \\mathrm{clip}\\bigl(\\beta + \\eta \\cdot (\\mathrm{KL}_{\\text{obs}} - \\mathrm{KL}_{\\text{target}}),\\ \\beta_{\\min},\\ \\beta_{\\max}\\bigr)
-
-这里 ``beta`` 是**跨 step 存活**的状态，``KL_obs`` 来自本步的日志，而它的作用点是
-**另一个组件的 Python 属性**。塞进任何现有 category 都会歪：它不是 loss（不改梯度）、
-不是 processor（不碰 Batch）、不是 advantage（不碰奖励）。
-
-所以给它一个 category：**有状态的系数调度器**。
-
-``requires`` / ``provides`` 刻意为空
-----------------------------------
-这不是偷懒。控制器唯一做的事情是改另一个组件的属性，它既不读也不写 Batch。
-如果为了「看起来自洽」而声明 ``requires = {REF_LOGPROBS}``，它会**错误地成为
-拉起 Reference 模型的原因** —— 而真正需要 Reference 的是它绑定的那个 KL 项。
-需求归属必须留在损失项上，否则 ``plan_assembly`` 的 ``model_reasons`` 会指向
-一个根本没碰过那个字段的组件，排查时会被带偏。
-
-绑定用 ``LossTerm.name()``，不是 YAML 的 ``type``
-------------------------------------------------
-指标键 ``loss/{name}/mean_kl`` 就是用 ``name()`` 拼出来的（见 ``core.base_loss``
-里 ``LossComposition.__call__`` 的 ``prefix``）。用同一个标识符做**绑定**和
-**读数**，能消掉一整类「绑对了项、却读错了键」的 bug —— 那种错会让控制器读到
-``KeyError`` 或（更糟）一个恒为 0 的默认值，然后安静地把系数调到界外。
-
-所以 YAML 里写 ``term: kl_k3``（注册名恰好也是 ``kl_k3``，但语义上是 ``name()``）。
-不写 ``term`` 时会自动探测名字以 ``kl`` 开头的项，**候选不唯一就报错**，不猜。
-
-β 的生效时机（容易误解，必须知道）
---------------------------------
-``on_train_step_end`` 在一个 train_step 的**最后**被调用，而 ``LossComposition``
-是在 epoch × mini-batch 循环**内部**逐块调用的。所以第 k 步写进去的系数，
-要到**第 k+1 步**才影响损失 —— 第 k 步后续的 mini-batch 不会受影响。
-
-这是刻意的，不是缺陷：要让新系数在当前步的剩余 mini-batch 生效，就得把控制器
-塞进 ``LossComposition`` 的循环里，那会让「一项损失算多少次」和「系数改多少次」
-纠缠在一起，且每个 mini-batch 读到不同的 β，梯度不再是无偏的同一个目标。
-"""
 
 from __future__ import annotations
 
@@ -61,12 +15,6 @@ _AUTO_PREFIX = "kl"
 def resolve_target(
     controller: "Controller", terms: dict[str, LossTerm]
 ) -> tuple[str | None, list[str]]:
-    """解析控制器要调整的损失项名，返回 ``(项名 或 None, 问题列表)``。
-
-    纯函数 —— 不改控制器状态，也不改 ``terms``。``plan_assembly`` 用它一次收齐
-    全部控制器的全部问题（而不是修一个报一个）；``Controller.bind`` 用它做运行期
-    兜底（支持不经 ``plan_assembly`` 手工组装 trainer 的用法）。
-    """
     spec = controller.term_spec
     if spec is not None:
         if spec in terms:
@@ -158,15 +106,6 @@ class Controller(Component):
         return self.target.name()
 
     def bind(self, terms: dict[str, LossTerm]) -> None:
-        """解析并锁定要调整的损失项。
-
-        ``terms`` 是 ``{name(): LossTerm}``，**只含权重非零的存活项**
-        （零权重项在装配前已被剔除）。
-
-        这里重跑一遍 ``plan_assembly`` 已经做过的检查：不是冗余，而是服务于
-        「手工组装 trainer、不经过 plan_assembly」的用法。两条路径的检查逻辑
-        共用同一组纯函数，所以不会出现两处判断不一致。
-        """
         name, problems = resolve_target(self, terms)
         if name is not None:
             problems = problems + check_target(name, terms[name])

@@ -1,8 +1,3 @@
-"""本地磁盘 checkpoint 后端。
-
-这也是**基础设施**而不是算法实现 —— 没有它，``TrainerState`` 那个抽象就没有
-任何可验证的落地实现，断点续训的正确性也无从测试。
-"""
 
 from __future__ import annotations
 
@@ -36,8 +31,6 @@ class LocalCheckpointer(Checkpointer):
     # ------------------------------------------------------------------
     def save(self, state: TrainerState, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        # weights_only=False：TrainerState 里有 RNG 状态、优化器超参等非张量对象。
-        # 这是可信来源（你自己刚存的文件），不是外部输入。
         torch.save(state, path)
         if self.keep_last:
             self._prune(os.path.dirname(path))

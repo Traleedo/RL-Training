@@ -1,67 +1,29 @@
-# PPO 一类「有 critic」的算法。
-#
-# 与 grpo.yaml 的差量只有下面两块（有一个测试在守着这条）。
-#
-# 关键观察：advantage 用的是 gae，它的 requires 里有 rollout_values，
-# 于是 plan_assembly 推导出「需要 Critic」并把它构建出来。
-# 同一个基座、同一个 trainer、同一份训练循环，只是这里多声明了一个依赖。
-#
-# 这里**全部是真实组件**：算法组件在 src/components/（advantage + 三个 loss），
-# 模型组件在 src/models/（actor / critic / reference / rollout 走 hf_*），
-# scorer 是真实的奖励模型。没有一个是测试夹具。
-#
-# 本文件只声明「结构与旋钮」，基座在 defaults 指向的 model/ 那一份里 ——
-# 换 Qwen2.5 的尺寸只改 -m，这里一个字都不用动。
-
-defaults: [../base, ../model/qwen2.5-1.5b]
+defaults: [../base, ../model/qwen3-0.6b]
 
 rollout:
-  # 单采样：优势由 GAE 从价值函数算出来，而不是靠组内比较。
   num_generations: 1
 
 reward:
   scorer:
     type: hf_reward_model
   processors:
-    # 单采样下组内标准差恒为 0，只能用全局归一化。
-    # 它 normalizes_rewards=True，所以 gae 那边保持 assumes_normalized_rewards
-    # 默认的 False —— 两处都做会被 plan_assembly 在启动时判为冲突。
     - type: global_normalize
 
 algorithm:
-  # GAE 的 requires 里有 rollout_values -> Critic 会被构建。
   advantage:
     type: gae
     gamma: 0.99
     lam: 0.95
 
   losses:
-    # ratio 裁剪的策略梯度项。clip_frac 健康区间大致 0.05 ~ 0.2。
     - type: ppo_clip
       weight: 1.0
       clip_eps: 0.2
-
-    # 价值回归。它也读 rollout_values（作裁剪基准），
-    # 所以 GAE 声明的 transient 释放不会把它删掉 —— 见 engine/rl_trainer.py 的
-    # _releasable 推导。
     - type: value_loss
       weight: 0.5
       clip_eps: 0.2
-
-    # KL 锚。beta 写在 coef 里、weight 固定 1.0，
-    # 这样 loss/kl_k3 的含义唯一（就是 beta x 平均 KL）。
-    # coef 改成 0.0 会让 Reference 模型整个不再加载。
-    #
-    # kl_k3 = mean(exp(-delta) - 1 + delta)，恒非负，是 Schulman 三种估计量里
-    # 方差与偏差折中的那个，也是 PPO / GRPO 实现普遍用的。另两个估计量
-    # （kl_k1 无偏但可正可负、kl_k2 有偏）见 configs/ppo_kl_k1.yaml 与 kl_k2。
     - type: kl_k3
       weight: 1.0
       coef: 0.01
-
-  # PPO 的正确性依赖「同一个样本被多个 epoch 复用」：
-  # 第 2 个 epoch 的 ratio 必须仍然是 exp(logπ_θ - logπ_old)，
-  # 其中 logπ_old 是 rollout 那一刻的值。这道保护由三处共同保证
-  # （字段名物理分离 / freeze / 专项测试），见 README。
   epochs: 2
-  mini_batch_size: 2
+  mini_batch_size: 8

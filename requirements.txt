@@ -1,57 +1,21 @@
-
-
 torch>=2.0
 numpy>=1.24
-# 训练循环的进度条（scripts/train.py 直接 import）。transformers 也依赖它，
-# 但这里是显式声明，避免「框架代码直接用了某个传递依赖」这种隐性耦合。
 tqdm>=4.64
-
-# **不要装 torchvision / torchaudio。**
-#
-# 本仓库一行都没引用它们（纯文本框架，用不到视觉 / 音频）。但 transformers
-# >=4.51 在导入任何建模类时会连带 import transformers.loss -> image_utils ->
-# torchvision，而那道守卫只看「这个包在不在」（find_spec，不试导入）。于是只要
-# 它装着、且与 torch 版本对不上，**所有**模型都导不进来，报错还完全看不出原因：
-#
-#     RuntimeError: operator torchvision::nms does not exist
-#     ModuleNotFoundError: Could not import module 'Qwen2ForCausalLM'   <- 被裹了一层
-#
-# 典型来源：装过 CUDA 版的 torchvision/torchaudio，之后单独升级了 torch ——
-# 这两个伴生包各自 pin 死了旧 torch 的**精确**版本，于是 ABI 对不上。检查与处理：
-#
-#     python -m pip list | grep -iE "^(torch|torchvision|torchaudio) "
-#     python -m pip uninstall -y torchvision torchaudio
-#
-# 三个版本号必须一致；不一致就卸掉，不要试图去「修」它。真需要它们（比如另一
-# 个项目要用视觉），那也得与 torch 同版本一起装。
-
-# 配置：YAML + 结构化访问与合并。
-# 选 OmegaConf 而不是 Hydra：本项目只需要一层继承，而 Hydra 会顺带引入
-# 运行目录 / 多任务 / 命令行覆写一整套约定。
 omegaconf>=2.3
 PyYAML>=6.0
-
-# HF 模型层（可选，见上）。
-#
-# 上限 <5 是**硬的**：transformers 5.x 要求 torch>=2.5，而服务器上是
-# 2.4.0+cu118 —— 装 5.x 会直接报
-#     [transformers] Disabling PyTorch because PyTorch >= 2.5 is required
-#     [transformers] PyTorch was not found.
-# 模型一个都导不进来。
-#
-# 下限 4.37 是 Qwen2.5 的要求（Qwen3 才要 4.51，Qwen2.5 只要 4.37）。
-# 想同时躲开上面那段 torchvision 的链（≥4.51 才有），就落在 4.37–4.50 之间：
-# 判据是 `python -c "import transformers,os;print(os.path.isdir(os.path.join(os.path.dirname(transformers.__file__),'loss')))"`
-# 输出 False（即不存在 transformers/loss/ 这个包）。
 transformers>=4.37,<5
+modelscope >= 1.40.1
 
-# 下载 fallback（可选）。HuggingFace 拉不到模型时，src/models/hf_common.py 会
-# 自动落到 modelscope 下载同一份权重（见 resolve_model_source）。HF 能直连的
-# 机器不用装；国内网络建议装：
-#
-#     pip install modelscope
-#
-# 默认用同一个 repo id 在两边各试一次；个别模型两边 id 不一样时，在模型配置里
-# 加一行 modelscope_id: <魔搭上的 id> 显式指定。
-# modelscope>=1.9
+# RL 的 --dataset 下载（本地 --prompts 不需要它）。
+# 没装时只有 --dataset 这条路会报错，训练其余部分不受影响。
+datasets >= 2.19
 
+# wandb 日志后端（**可选**，见 configs/base.yaml 里注释掉的 loggers 示例）。
+#
+# 不写死在这里：没装时 WandbLogger 会降级为 no-op 并打一条 WARNING，
+# 训练不受影响。要用再装：
+#
+#     pip install wandb
+#
+# 没有外网的机器先 export WANDB_MODE=offline，跑完再 wandb sync 上传。
+# wandb>=0.16

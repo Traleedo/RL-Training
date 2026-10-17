@@ -1,27 +1,3 @@
-"""核心抽象层。
-
-这个包只放三样东西：**抽象接口、注册表、Batch 容器**。
-它绝不 import ``components`` / ``models`` / ``engine`` —— 依赖方向只能是单向的。
-
-因此新增组件时的铁律是：
-
-    components/** 之间的实现文件**不许互相 import**，只能 ``from core import ...``
-
-这条由 ``tests/test_no_cross_imports.py`` 静态守护。它保证了「把任意组件拔掉、
-换上另一个同 category 的实现」永远可行 —— 也就是整个框架存在的理由。
-
-关于下面的 ``__getattr__``
--------------------------
-``Batch`` / ``tensor_ops`` / 三个携带张量的基类都要 ``import torch``，而
-``import torch`` 是这个仓库最贵的一次导入（约两秒）。但 ``core.config``、
-``core.registry``、``core.interfaces`` 都是纯 Python，脚本想只读一个 YAML
-或只查一个名字时不该付这个钱。
-
-所以只有 ``interfaces`` 与 ``registry`` 是急切导入的（``interfaces`` 必须在
-最前面：其它子模块会 ``from core import interfaces as F``），其余按需加载。
-``from core import Batch`` 与 ``from core.batch import Batch`` 两种写法都照常可用。
-"""
-
 from __future__ import annotations
 
 import importlib

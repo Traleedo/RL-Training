@@ -90,22 +90,6 @@ class TrainerState:
 
 
 class Checkpointer(Component):
-    """存/取 ``TrainerState``。
-
-    ``save_dir`` 与 ``every_n_steps`` 是**公共参数**（由基类持有、trainer 读取），
-    于是 YAML 里可以自然地把它们写在 ``checkpointer`` 节点下，
-
-    .. code-block:: yaml
-
-        checkpointer:
-          type: local
-          save_dir: ckpts/my_run
-          every_n_steps: 50
-
-    而不需要在 trainer 里把这些键从配置中剥掉再传给构造函数 ——
-    「悄悄剥掉配置键」会让使用者对「哪个键到底属于谁」产生困惑。
-    """
-
     category = "checkpointer"
 
     requires = frozenset()

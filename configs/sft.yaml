@@ -1,12 +1,16 @@
-defaults: [base, model/qwen2.5-1.5b]
+defaults: [base, model/qwen3-0.6b]
+
+optim:
+  # 全量 SFT 的常用量级；比 base 里的 RL 学习率高一个数量级。
+  lr: 1.0e-5
+
 trainer:
   kind: offline
-  run_name: sft
 
 data:
   type: jsonl_sft
   path: data/sft_sample.jsonl
-  batch_size: 4
+  batch_size: 8
   shuffle: true
 
 algorithm:
@@ -15,4 +19,4 @@ algorithm:
       weight: 1.0
       reduction: token_mean
   epochs: 2
-  mini_batch_size: 4
+  mini_batch_size: 8

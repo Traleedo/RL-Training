@@ -40,12 +40,6 @@ class HFOutcomeRewardScorer(Scorer):
         return self._model
 
     def score(self, batch: Batch) -> Batch:
-        # 依赖的是**文本**而不是 actor 的 input_ids。基类 Scorer 的 requires
-        # 声明的是 prompt_texts / response_texts，就是为这件事 —— 奖励模型
-        # 几乎必然与 actor 不是同一个词表（Skywork 是 Llama-3.1，actor 是
-        # Qwen2.5）。batch 里的 input_ids 是 actor 的 tokenizer 产出的，
-        # 直接喂给奖励模型的 embedding 会 IndexError: index out of range in self。
-        # 所以必须用奖励模型自己的 tokenizer 把文本重新编码一遍。
         batch.require(
             F.PROMPT_TEXTS, F.RESPONSE_TEXTS, who="HFOutcomeRewardScorer"
         )

@@ -1,34 +1,3 @@
-"""价值函数的回归损失（PPO 的 critic 项）。
-
-.. math::
-
-    L = \\mathbb{E}_t\\left[\\max\\left((V_\\theta(s_t) - R_t)^2,\\
-        (\\mathrm{clip}(V_\\theta(s_t), V_{\\text{old}} - \\epsilon, V_{\\text{old}} + \\epsilon) - R_t)^2\\right)\\right]
-
-与 ``fixture_value`` 的区别只有裁剪，但裁剪恰好暴露了这个框架里一个关键设计。
-
-``V_old`` 从哪来
-----------------
-PPO 的 value clipping 需要一个「更新前」的基准。本框架里它就是
-``rollout_values`` —— 行为策略在 rollout 时刻算出的价值。
-
-于是出现一个值得注意的现象：``rollout_values`` 同时被两类组件需要 ——
-
-- ``GAEAdvantage`` 把它声明为 ``transient_requires``（用完即弃，省显存）；
-- 本项把它写进 ``requires``（训练全程都要）。
-
-trainer 的释放规则是 ``transient - loss_needs``（见 ``engine/rl_trainer.py``），
-所以只要本项声明了它，它就不会被释放。**两者都不需要知道对方存在** ——
-这是「自动推导」比「手写释放列表」更可靠的地方。
-
-诚实说明一处近似
-----------------
-严格的 PPO 里，第 2 个 epoch 的 ``V_old`` 应当是**上一轮 minibatch 更新后**的价值，
-而 ``rollout_values`` 是 rollout 那一刻的价值。本框架用后者，因为价值函数通常
-每个 rollout 只前向一次，而且 ``rollout_values`` 已被 ``freeze()`` 保护、不会被
-epoch 循环悄悄刷新 —— 用「固定的旧价值」比用「漂移的基准」更接近 PPO 的意图。
-"""
-
 from __future__ import annotations
 
 import torch

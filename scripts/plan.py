@@ -1,17 +1,3 @@
-"""打印一个配置的**装配计划** —— 不训练、不下载模型，只回答「会构建什么、为什么」。
-
-用法::
-
-    python -X utf8 scripts/plan.py ppo            # 也接受 rl/ppo 或完整路径
-    python -X utf8 scripts/plan.py dapo
-    python -X utf8 scripts/plan.py --all          # 全部配置并排看
-
-核心问题：``配置里写了 critic 那一段`` **不等于** ``Critic 会被加载``。到底加载
-哪些模型，是从存活组件的 ``needed`` 并集推出来的。例如 ``dapo.yaml`` 里还挂着
-``kl_k3`` 那一行，Reference 却不会被构建 —— 因为 ``coef: 0.0`` 释放了
-``ref_logprobs`` 依赖。这件事只有把计划打出来才看得见。
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -30,10 +16,6 @@ CONFIGS = ROOT / "configs"
 def describe_config(path: Path) -> None:
     from core.config import load_config
     from engine.logic import build_logic_components
-
-    # 用 build_logic_components 而不是 build_trainer：后者会**真的把模型建出来**。
-    # 计划只依赖各组件的 requires / provides，而那些组件全是纯逻辑 —— 换到真实
-    # 的 Qwen2.5 之后，「看一眼计划」不该变成「先下载几 GB + 一个 8B 奖励模型」。
     cfg = load_config(path)
     logic = build_logic_components(cfg)
     plan = logic.plan
@@ -45,8 +27,6 @@ def describe_config(path: Path) -> None:
           f"（trainer.kind={cfg.trainer.get('kind', 'rl')}）")
 
     if logic.dataset is not None:
-        # 数据集是离线家族的相位 A，也是它的 provides 里唯一可能多出
-        # preference 的地方 —— 而 preference 正是 DPO 被装配出来的依据。
         print(f"\n  {logic.dataset.describe()}")
 
     print(plan.describe())

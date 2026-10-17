@@ -47,6 +47,10 @@ class Trainer:
         self.loggers = [
             build("logger", node) for node in config.get("loggers", []) or []
         ]
+        # 把最终配置交给后端（wandb 的 hparams 靠这个）。此刻 config 已经
+        # 完成 -m 的合并，是第一行日志之前，也是唯一一次「配置已定型」的时机。
+        for lg in self.loggers:
+            lg.log_config(config)
         self.checkpointer = build("checkpointer", config.checkpointer)
 
         # ==============================================================
