@@ -7,8 +7,6 @@ from core.base_loss import LossTerm
 from core.component import Component
 
 __all__ = ["Controller", "resolve_target", "check_target"]
-
-#: 不写 ``term:`` 时的自动探测前缀。候选不唯一即报错，不猜。
 _AUTO_PREFIX = "kl"
 
 

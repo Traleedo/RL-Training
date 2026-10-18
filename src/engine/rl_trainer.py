@@ -35,6 +35,10 @@ class RLTrainer(Trainer):
                     f"reward.scorer.type 是 hf_reward_model，但配置里没有可用的 "    
                 )
             scorer_kwargs["model_config"] = reward_model_cfg
+            # 把 reward_model 配置里的 batch_size / scale 真正接进 scorer：
+            # 之前只传了 model_config，这两项是死配置（恒用默认 16 / 1.0）。
+            scorer_kwargs["batch_size"] = int(reward_model_cfg.get("batch_size", 16))
+            scorer_kwargs["scale"] = float(reward_model_cfg.get("scale", 1.0))
         self.scorer = build("scorer", scorer_cfg, **scorer_kwargs)
 
         self.processors = [

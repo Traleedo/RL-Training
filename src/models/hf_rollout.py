@@ -42,6 +42,18 @@ class HFRolloutEngine(RolloutEngine):
         self.do_sample = bool(do_sample)
         self.recompute_logprobs = bool(recompute_logprobs)
 
+    def _format_prompt(self, prompt: str) -> str:
+        """把裸 instruction 包进 chat 模板（带生成引导），供 instruct 模型生成。
+
+        只影响「喂给模型」的文本；``PROMPT_TEXTS`` 仍存原始 instruction，
+        打分器会拿它和 response 重新拼 ``[user, assistant]`` 对话。
+        """
+        return self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
     # ------------------------------------------------------------------
     def generate(
         self,
@@ -64,10 +76,15 @@ class HFRolloutEngine(RolloutEngine):
             raise ValueError("generate 收到空的 prompt 列表")
 
         expanded = [p for p in prompts for _ in range(num_generations)]
+        # Qwen3 这类 instruct 模型吃 chat 模板格式化后的输入，裸文本生成质量会
+        # 明显变差。这里只管「喂给模型生成」的那份文本；PROMPT_TEXTS 仍存原始
+        # instruction —— 打分器要拿原始 instruction + response 重新拼
+        # [user, assistant] 对话喂给奖励模型，两边各用各的模板。
+        formatted = [self._format_prompt(p) for p in expanded]
 
         device = next(self._model.parameters()).device
         encoded = self.tokenizer(
-            expanded,
+            formatted,
             return_tensors="pt",
             padding=True,          # tokenizer.padding_side 已在加载时设为 left
             add_special_tokens=False,

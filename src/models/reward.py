@@ -45,9 +45,22 @@ class HFOutcomeRewardScorer(Scorer):
         )
         device = next(self._model.parameters()).device
 
+        # Skywork-Reward-V2-Qwen3-8B 是序列分类模型，官方用法要求把「完整对话」
+        # 用 chat 模板包成 [user, assistant] 再送进去，**不是**裸文本直接拼接。
+        # 裸拼接会喂出一堆越界 token，打分退化成几乎常数 -> group_normalize 的
+        # σ≈0 -> advantage≈0 -> 策略梯度≈0，这就是「训练几乎不动」的根因。
         full_texts = [
-            str(prompt) + str(response)
-            for prompt, response in zip(batch[F.PROMPT_TEXTS], batch[F.RESPONSE_TEXTS])
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": str(prompt)},
+                    {"role": "assistant", "content": str(response)},
+                ],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            for prompt, response in zip(
+                batch[F.PROMPT_TEXTS], batch[F.RESPONSE_TEXTS]
+            )
         ]
 
         scores: list[torch.Tensor] = []
@@ -58,6 +71,7 @@ class HFOutcomeRewardScorer(Scorer):
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
+                    add_special_tokens=False,
                 )
                 outputs = self._model(
                     input_ids=encoded["input_ids"].to(device),
