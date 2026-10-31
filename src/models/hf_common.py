@@ -46,35 +46,66 @@ def resolve_dtype(name: str | None) -> torch.dtype:
 
 @lru_cache(maxsize=None)
 def _download_to_local(name: str, modelscope_id: str | None) -> str:
-    hf_error: BaseException | None = None
+    """把模型解析成本地目录。**先查本地缓存，再走网络。**
 
-    # 1. modelscope
+    缓存优先很重要：GPU 机器上这个函数在加载每个模型时都会被调用一次，
+    如果每次都要先探一下 ModelScope 的远端，那么「已经下载好的模型」
+    也会在启动时卡上几分钟 —— 表现就是训练一个 step 都不走、也没有输出。
+    """
+    # 0) 本地 HF 缓存。local_files_only=True 时完全不联网；没缓存就抛异常。
+    try:
+        from huggingface_hub import snapshot_download
+
+        cached = snapshot_download(repo_id=name, local_files_only=True)
+    except Exception:  # noqa: BLE001 — 没缓存是常态，不算错误
+        cached = None
+    if cached:
+        logger.info("使用本地缓存的模型 %s：%s", name, cached)
+        return cached
+
+    errors: list[str] = []
+
+    # 1) modelscope（国内网络通常走这条）
     try:
         from modelscope import snapshot_download as ms_snapshot_download
     except ImportError:
-        raise RuntimeError(
-            f"从 HuggingFace 下载 {name} 失败，而 modelscope 未安装，无法 fallback。\n"
-            f"  HF 失败原因：{hf_error}\n"
-            f"  两条出路任选：pip install modelscope（国内网络），"
-            f"或确认这台机器能访问 huggingface.co"
-        ) from hf_error
+        errors.append("modelscope 未安装")
+    else:
+        ms_name = modelscope_id or name
+        logger.info("正在从 ModelScope 下载 %s（首次运行要下权重，可能很久）…", ms_name)
+        try:
+            path = ms_snapshot_download(model_id=ms_name)
+        except Exception as ms_exc:  # noqa: BLE001
+            errors.append(f"ModelScope({ms_name}): {ms_exc}")
+            logger.warning("从 ModelScope 下载 %s 失败：%s", name, ms_exc)
+        else:
+            logger.info("ModelScope 下载完成：%s", path)
+            return path
 
-    ms_name = modelscope_id or name
-    try:
-        return ms_snapshot_download(model_id=ms_name)
-    except Exception as ms_exc:  # noqa: BLE001
-        logger.warning("从 mdoelscope 下载 %s 失败：%s", name, exc)
-    # 2. HF
+    # 2) HuggingFace
     try:
         from huggingface_hub import snapshot_download
 
         # 注意：snapshot_download 只下载文件、不执行 remote code，所以没有
         # trust_remote_code 参数（那是 from_pretrained 的参数）。remote code
         # 文件（modeling_*.py）默认也会被一并下载下来。
-        return snapshot_download(repo_id=name)
+        logger.info("正在从 HuggingFace 下载 %s…", name)
+        path = snapshot_download(repo_id=name)
     except Exception as exc:  # noqa: BLE001 — 网络/权限/仓库不存在都算「这个源不可用」
-        hf_error = exc
+        errors.append(f"HuggingFace({name}): {exc}")
         logger.warning("从 HuggingFace 下载 %s 失败：%s", name, exc)
+    else:
+        logger.info("HuggingFace 下载完成：%s", path)
+        return path
+
+    # 两个源都失败时必须**抛错**。以前这里会静默返回 None，于是错误推迟到
+    # from_pretrained(None) 才炸，报错信息与真正原因（下载失败）毫无关系。
+    raise RuntimeError(
+        f"模型 {name} 既不在本地缓存，也无法从 ModelScope / HuggingFace 下载。\n"
+        + "\n".join(f"  - {e}" for e in errors)
+        + "\n  出路任选：确认网络；把 name_or_path 指向一个本地目录；"
+          "或先手动下载后设置 HF_HUB_OFFLINE=1（只读缓存）。"
+    )
 
 def resolve_model_source(model_config: Any) -> str:
     name = str(model_config.name_or_path)
@@ -114,6 +145,7 @@ def load_tokenizer(model_config: Any, tokenizer=None):
         return tokenizer
     from transformers import AutoTokenizer
 
+    logger.info("正在加载分词器 %s…", model_config.get("name_or_path"))
     tokenizer = AutoTokenizer.from_pretrained(
         resolve_model_source(model_config), **_tokenizer_kwargs(model_config)
     )
@@ -132,15 +164,18 @@ def _from_pretrained(auto_cls, model_config: Any, tokenizer, **extra):
     if model_config.get("attn_implementation"):
         kwargs["attn_implementation"] = str(model_config.attn_implementation)
 
+    dtype = resolve_dtype(model_config.get("dtype"))
+    name = model_config.get("name_or_path")
     config = model_config.get("config")
     if config is not None:
         # 允许直接把一个已构造好的 config 塞进来（e2e 脚本离线跑用）
-        model = auto_cls(config, **extra)
         logger.info("从内存里的 config 构造 %s（未加载预训练权重）", auto_cls.__name__)
+        model = auto_cls(config, **extra)
     else:
+        logger.info("正在加载模型 %s（dtype=%s）…", name, dtype)
         model = auto_cls.from_pretrained(resolve_model_source(model_config), **kwargs, **extra)
+        logger.info("模型加载完成：%s", name)
 
-    dtype = resolve_dtype(model_config.get("dtype"))
     model = model.to(dtype) if dtype != torch.float32 else model
     return model
 

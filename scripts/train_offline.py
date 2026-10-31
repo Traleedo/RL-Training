@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -36,7 +37,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--every", type=int, default=0, help="每 N 步打印一次指标（0 = 每步都打）"
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="日志级别（默认 INFO）",
+    )
     return parser.parse_args(argv)
+
+
+def configure_logging(level: str) -> None:
+    """``ConsoleLogger`` 走标准 ``logging``；不配置时根 logger 停在 WARNING，
+    所有 INFO 进度都会被静默丢弃，训练看起来像卡死了。"""
+    logging.basicConfig(
+        level=getattr(logging, str(level).upper(), logging.INFO),
+        format="%(asctime)s  %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
 
 
 def resolve_config(name: str) -> Path:
@@ -56,6 +75,7 @@ def resolve_config(name: str) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    configure_logging(args.log_level)
     if args.steps is not None and args.steps < 1:
         print("--steps 必须 >= 1", file=sys.stderr)
         return 2

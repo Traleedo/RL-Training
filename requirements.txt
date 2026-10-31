@@ -18,4 +18,4 @@ datasets >= 2.19
 #     pip install wandb
 #
 # 没有外网的机器先 export WANDB_MODE=offline，跑完再 wandb sync 上传。
-# wandb>=0.16
+wandb>=0.16

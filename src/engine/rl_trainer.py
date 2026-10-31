@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import warnings
 from collections import defaultdict
 from typing import Any
@@ -64,6 +65,17 @@ class RLTrainer(Trainer):
         self.plan.raise_if_invalid()
         self._bind_controllers()
         logger.info("\n%s", self.plan.describe())
+
+        # CPU 上跑真实规模 RL 是「看起来卡死」的最常见原因：0.6B 策略的生成
+        # 与 8B 奖励模型的前向在 CPU 上要按小时计。启动时就说清楚，
+        # 而不是让人盯着一个不动的进度条猜。
+        if self.device.type == "cpu" and str(self.cfg.actor.get("type")) == "hf_causal_lm":
+            logger.warning(
+                "trainer.device 解析为 cpu。真实规模的 RL（生成 + 大奖励模型前向）"
+                "在 CPU 上单个 step 可能需要数小时，表现就像卡死。"
+                "请确认 torch.cuda.is_available() 为 True；"
+                "只想验证链路请用 scripts/verify_e2e.py --stage 1（微型模型）。"
+            )
 
         model_cfg = self.cfg.model
 
@@ -196,6 +208,19 @@ class RLTrainer(Trainer):
             )
 
     # ==================================================================
+    # 计时
+    # ==================================================================
+    def _now(self) -> float:
+        """GPU 上的算子默认异步，不同步就直接读时钟会漏掉排队中的工作。
+
+        每个相位边界同步一次，代价是几次 ``cudaSynchronize``，相对于一个
+        训练步可以忽略；换来的是「哪一段真的慢」有据可查。
+        """
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return time.perf_counter()
+
+    # ==================================================================
     # 训练
     # ==================================================================
     def train_step(self, prompts: list[str]) -> dict[str, float]:
@@ -206,18 +231,39 @@ class RLTrainer(Trainer):
         """
         num_generations = int(self.cfg.rollout.get("num_generations", 1))
         collected: dict[str, list[float]] = defaultdict(list)
+        # 分相位计时。没有它，「训练很慢」只能靠猜 —— 生成 / 8B 奖励模型打分 /
+        # 参考模型前向 / 反向更新这四段的量级差别很大，优化对象完全不同。
+        timings: dict[str, float] = {}
+        t_begin = self._now()
+
+        max_new_tokens = int(self.cfg.rollout.get("max_new_tokens", 512))
+        if self.global_step == 0:
+            # 第一步之前把「接下来要算什么」打出来。没有这几行，第一次
+            # 生成（尤其是 160 条 × 512 token）期间屏幕上一片空白，看起来像卡死。
+            logger.info(
+                "第 1 步开始：%d 条 prompt × %d 次生成 = %d 条序列，max_new_tokens=%d",
+                len(prompts),
+                num_generations,
+                len(prompts) * num_generations,
+                max_new_tokens,
+            )
 
         # ================= A. 生成 =================
         with torch.no_grad():
             batch = self.rollout.generate(
                 prompts,
                 num_generations=num_generations,
-                max_new_tokens=int(self.cfg.rollout.get("max_new_tokens", 512)),
+                max_new_tokens=max_new_tokens,
                 temperature=float(self.cfg.rollout.get("temperature", 1.0)),
                 top_p=float(self.cfg.rollout.get("top_p", 1.0)),
             )
         batch.meta[F.NUM_GENERATIONS] = num_generations
         batch.require(*F.ROLLOUT_OUTPUT_FIELDS, who="train_step 在 rollout 之后")
+        t = self._now()
+        timings["time/rollout_s"] = t - t_begin
+        t_begin = t
+        if self.global_step == 0:
+            logger.info("  生成完成：%.1fs", timings["time/rollout_s"])
 
         # ================= B. 打分 -> 奖励处理链 =================
         raw_reward_stats: dict[str, float] = {}
@@ -234,6 +280,12 @@ class RLTrainer(Trainer):
             for processor in self.processors:
                 batch = processor.process(batch)
         batch.require(F.REWARDS, who="train_step 在打分之后")
+
+        t = self._now()
+        timings["time/score_s"] = t - t_begin
+        t_begin = t
+        if self.global_step == 0:
+            logger.info("  奖励模型打分完成：%.1fs", timings["time/score_s"])
 
         if len(batch) == 0:
             logger.warning(
@@ -254,6 +306,12 @@ class RLTrainer(Trainer):
             if self.critic is not None and F.ROLLOUT_VALUES in self.plan.needed:
                 batch = self.critic.forward_values(batch, detach=True)
 
+        t = self._now()
+        timings["time/prepare_s"] = t - t_begin
+        t_begin = t
+        if self.global_step == 0:
+            logger.info("  参考模型前向完成：%.1fs", timings["time/prepare_s"])
+
         # ================= D. 优势 =================
         with torch.no_grad():
             batch = self.advantage.compute(batch)
@@ -263,6 +321,10 @@ class RLTrainer(Trainer):
         if self._releasable:
             batch.drop(*sorted(self._releasable & set(batch.tensors)))
 
+        t = self._now()
+        timings["time/advantage_s"] = t - t_begin
+        t_begin = t
+
         # ================= E. 冻结 + 切梯度 =================
         # freeze 让 rollout_logprobs 等字段变成只读。这是保证 PPO 第 2 个 epoch
         # 仍能拿到 rollout 时刻 old_logprobs 的第二道防线（第一道是字段名分离）
@@ -271,11 +333,26 @@ class RLTrainer(Trainer):
         # ================= F. epoch × mini-batch =================
         self._train_epochs(batch, collected)
 
+        t = self._now()
+        timings["time/train_s"] = t - t_begin
+        timings["time/step_s"] = sum(timings.values())
+        if self.global_step == 0:
+            logger.info(
+                "  第 1 步完成：rollout %.1fs / score %.1fs / prepare %.1fs / "
+                "advantage %.1fs / train %.1fs",
+                timings["time/rollout_s"],
+                timings["time/score_s"],
+                timings["time/prepare_s"],
+                timings["time/advantage_s"],
+                timings["time/train_s"],
+            )
+
         # ================= G. 汇总与记录 =================
         aggregated = self._aggregate(collected)
         aggregated.update(self._batch_metrics(batch))
         aggregated.update(raw_reward_stats)
         aggregated.update(self.advantage.metrics())
+        aggregated.update(timings)
         for component in [*self.processors, self.scorer]:
             aggregated.update(component.metrics())
 

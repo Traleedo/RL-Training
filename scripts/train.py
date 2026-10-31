@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from omegaconf import OmegaConf
@@ -74,7 +75,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--every", type=int, default=1, help="每 N 步打印一次指标")
     parser.add_argument("--set", action="append", default=[], metavar="K=V", help="任意点号覆盖，可重复")
     parser.add_argument("--plan", action="store_true", help="只打装配计划，不训练")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="日志级别（默认 INFO，会打印加载进度与分相位耗时）",
+    )
     return parser.parse_args(argv)
+
+
+def configure_logging(level: str) -> None:
+    """把日志接到 stdout。
+
+    ``ConsoleLogger`` 以及各组件里的 ``logger.info`` 都走标准 ``logging``；
+    **不配置的话根 logger 停在 WARNING**，于是模型加载、每步指标、分相位耗时
+    全被静默丢弃 —— 训练看起来就像「卡住不动，一点输出都没有」。
+    """
+    logging.basicConfig(
+        level=getattr(logging, str(level).upper(), logging.INFO),
+        format="%(asctime)s  %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
 
 
 def load_config_with_model(algorithm: str, model: str | None):
@@ -137,6 +160,7 @@ def build_prompt_sampler(args: argparse.Namespace, cfg):
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    configure_logging(args.log_level)
     if args.steps is not None and args.steps < 1:
         print("--steps 必须 >= 1", file=sys.stderr)
         return 2
