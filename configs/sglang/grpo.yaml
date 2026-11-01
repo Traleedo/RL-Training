@@ -1,0 +1,73 @@
+
+# GRPO + SGLang rollout（实验变体）。
+#
+# 为什么不在 configs/rl/ 里
+# -------------------------
+# ``configs/rl/*.yaml`` 是「随仓库交付的算法矩阵」：tests/test_configs.py 会对
+# 其中每一个**真的构造 trainer 并跑一步**（真模型）。这个变体多一个可选依赖
+# sglang，且只在 Linux + CUDA 上有意义 —— 放进矩阵会让「没装 sglang 的机器」
+# 上整套配置测试变红，而那种红与配置语义本身无关。
+#
+# 所以它是一个实验变体，显式选中：
+#
+#     python scripts/train.py -a sglang/grpo
+#
+# 与 configs/rl/grpo.yaml 的**唯一**差异是 rollout 块（有测试守着，
+# 见 tests/test_sglang_rollout.py::test_sglang_config_differs_from_grpo_only_in_rollout）。
+
+defaults: [../base, ../model/qwen3-0.6b]
+
+rollout:
+  type: sglang
+  # 算法签名，与 grpo.yaml 保持一致
+  num_generations: 8
+  max_new_tokens: 512
+  temperature: 1.0
+  top_p: 1.0
+
+  # ---- 后端选择 ----
+  # engine : 同进程 ``sglang.Engine``。推荐 —— 权重可以原地同步。
+  # http   : 连 ``sglang.launch_server`` 的 REST 接口（服务端独立进程）。
+  # mirror : 用 actor 本地 HF 生成。仅用于 CI 与链路验证，性能数据无意义。
+  runtime: engine
+
+  # ---- logprob 来源（消融轴 1）----
+  # sglang    : 复用采样端返回的 token logprob，省掉一次全序列前向。
+  # recompute : 用 actor 重新前向，与 hf 引擎逐位一致（``train/ratio_first == 1``）。
+  logprob_source: sglang
+
+  # ---- 权重同步（消融轴 2）----
+  # none   : 不同步。只适用于吞吐基准 —— 训练中会让重要性采样静默失效。
+  # tensor : 每个优化步之后推送全参权重（LoRA 暂不支持，会明确拒绝而不是半推）。
+  weight_sync: tensor
+
+  # ---- sglang 引擎参数 ----
+  dtype: bfloat16
+  tp_size: 1
+  # KV cache 的静态显存占比。与 actor 同卡共处时别设太高，否则训练相位 OOM。
+  mem_fraction_static: 0.55
+  # null -> 用 tokenizer.name_or_path（见 SGLangRolloutEngine._guess_model_path）
+  model_path: null
+  # runtime=http 时必填
+  server_url: null
+
+reward:
+  scorer:
+    type: hf_reward_model
+  processors:
+    - type: group_normalize
+
+algorithm:
+  advantage:
+    type: broadcast
+
+  losses:
+    - type: policy_gradient
+      weight: 1.0
+      reduction: seq_mean
+    - type: kl_k3
+      weight: 1.0
+      coef: 0.01
+
+  epochs: 2
+  mini_batch_size: 8

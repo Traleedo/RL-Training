@@ -8,7 +8,19 @@ __all__ = ["gather_token_logprobs", "masked_mean", "masked_sum", "broadcast_sequ
 def gather_token_logprobs(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
+    *,
+    chunk_rows: int | None = None,
 ) -> torch.Tensor:
+    """取每个位置上「真实 token」的 logprob，结果右对齐到 input_ids。
+
+    ``logits[:, :-1]`` 预测 ``input_ids[:, 1:]``。
+
+    分块：``log_softmax`` 前要先 ``.float()``，全 batch 一起转会在显存里
+    同时物化两份 ``[B, L-1, V]`` 的 fp32（实测 64 序列 × 150 token × 151k
+    词表 ≈ 13GB，6GB 卡直接 OOM）。log_softmax 逐行独立，按 batch 维分块
+    数值**逐位等价**、峰值显存只与 chunk 大小相关。``chunk_rows=None``
+    时按「fp32 chunk ≈ 2^27 个元素」自动定块长。
+    """
     if logits.dim() != 3:
         raise ValueError(f"logits 应为 [B, L, V]，收到 {tuple(logits.shape)}")
     if input_ids.shape != logits.shape[:2]:
@@ -17,18 +29,20 @@ def gather_token_logprobs(
             f"{tuple(logits.shape[:2])} 不一致"
         )
 
-    # logits[:, :-1] 预测 input_ids[:, 1:]
-    shifted_logits = logits[:, :-1, :]                  # [B, L-1, V]
-    shifted_labels = input_ids[:, 1:].unsqueeze(-1)     # [B, L-1, 1]
+    B, L, V = logits.shape
+    if chunk_rows is None:
+        chunk_rows = max(1, (1 << 27) // max(1, (L - 1) * V))
 
-    log_probs = torch.log_softmax(shifted_logits.float(), dim=-1)
-    gathered = log_probs.gather(-1, shifted_labels).squeeze(-1)   # [B, L-1]
+    out = torch.zeros(input_ids.shape, dtype=torch.float32, device=logits.device)
+    for start in range(0, B, chunk_rows):
+        sl = slice(start, min(start + chunk_rows, B))
+        # logits[:, :-1] 预测 input_ids[:, 1:]
+        chunk_lp = torch.log_softmax(logits[sl, :-1, :].float(), dim=-1)
+        gathered = chunk_lp.gather(
+            -1, input_ids[sl, 1:].unsqueeze(-1)
+        ).squeeze(-1)                                            # [b, L-1]
+        out[sl, 1:] = gathered
 
-    # 右侧补一位，保持与 input_ids 位置对齐
-    out = torch.zeros(
-        input_ids.shape, dtype=gathered.dtype, device=gathered.device
-    )
-    out[:, 1:] = gathered
     return out.to(logits.dtype)
 
 

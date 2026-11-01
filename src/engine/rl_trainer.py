@@ -87,6 +87,7 @@ class RLTrainer(Trainer):
         self.rollout = build(
             "rollout", self.cfg.rollout, model=actor_module, tokenizer=tokenizer
         )
+        logger.info("rollout：%s", self.rollout.describe())
 
         if self.plan.need_reference:
             # 默认加载**独立的冻结副本**。共享 actor 权重（关掉 LoRA adapter）
@@ -335,6 +336,20 @@ class RLTrainer(Trainer):
 
         t = self._now()
         timings["time/train_s"] = t - t_begin
+        t_begin = t
+
+        # ================= F2. 权重同步（仅外部推理引擎）=================
+        # sglang 这类引擎持有一份**独立**的权重副本。不推的话，第 k 步采样
+        # 用的还是第 0 步的策略，而 rollout_logprobs 记的是「谁采的」——
+        # ratio 从此恒等于 1，重要性采样静默失效而曲线完全正常。
+        # 本地 HF rollout 与 actor 共享同一个模块对象，uses_external_weights
+        # 为 False，这里直接跳过（零开销）。
+        if self.rollout.uses_external_weights:
+            self.rollout.sync_weights(self.actor.module)
+            t = self._now()
+            timings["time/weight_sync_s"] = t - t_begin
+            t_begin = t
+
         timings["time/step_s"] = sum(timings.values())
         if self.global_step == 0:
             logger.info(
@@ -393,3 +408,14 @@ class RLTrainer(Trainer):
                 batch[F.ADVANTAGES][batch[F.RESPONSE_MASK].bool()].std()
             ) if batch[F.RESPONSE_MASK].sum() > 1 else 0.0
         return out
+
+    def _release(self) -> None:
+        """关掉 rollout 持有的外部资源（sglang 引擎 / HTTP 会话 / 子进程）。
+
+        不关的话脚本退出时靠 GC 回收 GPU 显存，容易表现成
+        「上一个测试没释放，下一个 OOM」。经基类的 _release 钩子挂进
+        close() —— 骨架的 close 只定义一次，这里不重定义它。
+        """
+        rollout = getattr(self, "rollout", None)
+        if rollout is not None and callable(getattr(rollout, "close", None)):
+            rollout.close()

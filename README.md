@@ -721,6 +721,40 @@ algorithm:
 
 ---
 
+## 八、SGLang 加速 rollout（实验分支）
+
+`rollout` 是 `train_step` 里最容易被忽略的一项：HF 的 `generate` 逐 token 循环，
+`num_generations=8` × 512 token 就是几千次前向，量级常常压过打分与反向。
+
+`rollout.type` 可以换成 `sglang`，它实现的是**同一个** `RolloutEngine` 抽象 ——
+chat 模板、左 padding、`response_mask`、`group_ids` 连续块契约、logprob 放置
+全部复用 `models/rollout_common.py`，trainer 一行不用改：
+
+```yaml
+rollout:
+  type: sglang
+  runtime: engine            # engine / http / mirror
+  logprob_source: sglang     # 复用采样端 logprob，省掉一次全序列前向
+  weight_sync: tensor        # 每个优化步推送全参权重（LoRA 会明确拒绝）
+```
+
+三条设计约束值得记住：
+
+- **外部权重必须显式同步**。`uses_external_weights` + `sync_weights` 是基类声明的钩子，
+  `RLTrainer` 在优化步之后调用并记 `time/weight_sync_s`。不同步不会报错，
+  只会让 ratio 恒等于 1 —— 所以 `weight_sync=none` 会打 WARNING。
+- **sglang 是惰性依赖**。`import models` 不 import sglang，没装的机器照样跑全部 CPU 测试。
+- **`runtime=mirror`** 用本地 actor 生成，只用于 CI 与链路验证，性能数据无意义。
+
+消融脚本：`python scripts/ablate_rollout.py smoke`（CPU，正确性 + logprob 复用的一致性）
+与 `... bench --model Qwen/Qwen3-0.6B`（GPU，吞吐与加速比）。
+实测「复用采样端 logprob vs actor 重算」max |Δlogprob| = 4.8e-7（同一串 token），
+即省掉那次前向不改变语义。
+
+细节、三种 runtime 的对照表与已知限制见 [`docs/sglang-rollout.md`](docs/sglang-rollout.md)。
+
+---
+
 ## 组件速查
 
 ### `Batch` —— 全框架唯一的数据契约

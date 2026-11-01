@@ -23,6 +23,7 @@ try:
     from models.hf_critic import HFSharedValueCritic, HFValueCritic
     from models.hf_reference import HFFrozenReference
     from models.hf_rollout import HFRolloutEngine
+    from models.sglang_rollout import SGLangRolloutEngine
     from models.reward import HFOutcomeRewardScorer
 except ImportError as exc:  # pragma: no cover - 取决于环境
     try:
@@ -43,6 +44,7 @@ __all__ = [
     "HFSharedValueCritic",
     "HFFrozenReference",
     "HFRolloutEngine",
+    "SGLangRolloutEngine",
     "HFOutcomeRewardScorer",
     "load_causal_lm",
     "load_tokenizer",

@@ -5,11 +5,16 @@ from typing import Any
 
 import torch
 
-from core import interfaces as F
 from core.base_rollout import RolloutEngine
 from core.batch import Batch
 from core.registry import register
-from core.tensor_ops import gather_token_logprobs
+from models.rollout_common import (
+    assemble_batch,
+    format_chat_text,
+    recompute_batch_logprobs,
+    resolve_pad_token_id,
+    trim_at_eos,
+)
 
 __all__ = ["HFRolloutEngine"]
 
@@ -48,11 +53,7 @@ class HFRolloutEngine(RolloutEngine):
         只影响「喂给模型」的文本；``PROMPT_TEXTS`` 仍存原始 instruction，
         打分器会拿它和 response 重新拼 ``[user, assistant]`` 对话。
         """
-        return self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        return format_chat_text(self.tokenizer, prompt)
 
     # ------------------------------------------------------------------
     def generate(
@@ -93,9 +94,7 @@ class HFRolloutEngine(RolloutEngine):
         attention_mask = encoded["attention_mask"].to(device)
         prompt_width = input_ids.shape[1]
 
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
+        pad_token_id = resolve_pad_token_id(self.tokenizer)
 
         with torch.no_grad():
             sequences = self._model.generate(
@@ -116,21 +115,18 @@ class HFRolloutEngine(RolloutEngine):
         response_texts: list[str] = []
         for i in range(generated.shape[0]):
             real_prompt = input_ids[i][attention_mask[i].bool()]
-            row = generated[i]
-            if eos_id is not None:
-                hits = (row == eos_id).nonzero(as_tuple=False)
-                if hits.numel():
-                    row = row[: int(hits[0])]
+            row = trim_at_eos(generated[i], eos_id)
             prompt_ids.append(real_prompt)
             response_ids.append(row)
             response_texts.append(self.tokenizer.decode(row, skip_special_tokens=True))
-        batch = Batch.from_rollout(
+        batch = assemble_batch(
+            self.tokenizer,
             prompt_ids,
             response_ids,
             prompt_texts=expanded,
             response_texts=response_texts,
             num_generations=num_generations,
-            pad_token_id=int(pad_token_id),
+            pad_token_id=pad_token_id,
         )
 
         batch = self._fill_logprobs(batch)
@@ -141,21 +137,8 @@ class HFRolloutEngine(RolloutEngine):
         """算行为策略的 logprob。
         ``recompute_logprobs=True``（默认）时对完整序列重新前向，这是推荐路径。
         """
-        model = self._model
-        if hasattr(model, "module"):        # DataParallel / DDP 包装
-            model = model.module
-
         if not self.recompute_logprobs:
             raise NotImplementedError(
                 "从 generate 的 scores 里取 logprob 的路径被有意不实现。\n"
             )
-
-        with torch.no_grad():
-            outputs = model(
-                input_ids=batch[F.INPUT_IDS],
-                attention_mask=batch[F.ATTENTION_MASK],
-            )
-            logprobs = gather_token_logprobs(outputs.logits, batch[F.INPUT_IDS])
-
-        batch[F.ROLLOUT_LOGPROBS] = logprobs.detach()
-        return batch
+        return recompute_batch_logprobs(self._model, batch)

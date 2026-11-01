@@ -441,6 +441,14 @@ class Trainer:
         for controller, item in zip(self.controllers, saved):
             controller.load_state_dict(item)
 
+    def _release(self) -> None:
+        """子类持有的、需要显式释放的领域组件在这里关（默认无）。
+
+        放在 close() 里由骨架统一调用 —— 子类不重定义 close，
+        资源释放的知识属于子类，钩子名保持中性。
+        """
+
     def close(self) -> None:
+        self._release()
         for lg in self.loggers:
             lg.close()
