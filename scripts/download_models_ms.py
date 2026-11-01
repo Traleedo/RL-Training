@@ -11,7 +11,7 @@
 
     python scripts/download_models_ms.py                  # 策略模型（跑 bench 够用）
     python scripts/download_models_ms.py --only policy,reward
-    python scripts/download_models_ms.py --only all --cache /root/autodl-tmp/models
+    python scripts/download_models_ms.py --only all --cache /data/models
     python scripts/download_models_ms.py --list           # 只列清单
 
 下载完成后会打印每个模型的绝对路径，可直接填进配置的
@@ -38,7 +38,23 @@ MODELS: dict[str, tuple[str, str]] = {
     ),
 }
 
-DEFAULT_CACHE = os.environ.get("MODELSCOPE_CACHE", os.path.expanduser("~/autodl-tmp/models"))
+
+def _default_cache() -> str:
+    """权重放哪：显式 $MODELSCOPE_CACHE > AutoDL 大盘 > $HOME/models。
+
+    不写死某个平台的绝对路径 —— 换平台时这个默认值跟着 $HOME 走，
+    真有大盘（AutoDL 的 /root/autodl-tmp、其他平台的 /data、/workspace）
+    就用 --cache 指过去，脚本会自己 mkdir。
+    """
+    env = os.environ.get("MODELSCOPE_CACHE")
+    if env:
+        return env
+    if os.path.isdir("/root/autodl-tmp") and os.access("/root/autodl-tmp", os.W_OK):
+        return "/root/autodl-tmp/models"
+    return os.path.expanduser("~/models")
+
+
+DEFAULT_CACHE = _default_cache()
 
 
 def _resolve_only(value: str) -> list[str]:

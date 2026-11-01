@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # =====================================================================
-# AutoDL / 任意 Linux + NVIDIA 机器上一键搭 sglang rollout 环境
+# 任意 Linux + NVIDIA 机器上一键搭 sglang rollout 环境（AutoDL 只是其中之一）
 #
 # 用途：把「装 sglang」这件事里唯一容易踩死的两步固化下来
 #   1) sglang 与 torch / transformers 的版本必须成套（它 pin 得很死）
 #   2) PyPI 上的 sglang-kernel 只带 sm100 变体，sm80/sm89 要从官方索引装
 #
 # 用法：
-#   bash scripts/setup_autodl.sh              # 默认装到 /root/autodl-tmp/venv-sglang
+#   bash scripts/setup_autodl.sh              # venv 自动选址（见下方 VENV 解析）
 #   VENV=$PWD/.venv bash scripts/setup_autodl.sh
 #   SKIP_PROJECT=1 bash scripts/setup_autodl.sh   # 只装 sglang，不装本项目依赖
 #
 # 注意：脚本不碰系统 python，也不改 conda 环境，全部装进独立 venv。
+# 它不依赖仓库放在哪个目录，clone 到哪都能跑。
 # =====================================================================
 set -euo pipefail
 
@@ -20,12 +21,22 @@ SGLANG_VERSION="${SGLANG_VERSION:-0.5.13.post1}"
 # 换 sglang 版本时这两个要一起换，否则 import 期就会报版本断言失败。
 KERNEL_VERSION="${KERNEL_VERSION:-0.4.3+cu129}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-VENV="${VENV:-/root/autodl-tmp/venv-sglang}"
 PYPI_INDEX="${PYPI_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 KERNEL_INDEX="${KERNEL_INDEX:-https://docs.sglang.ai/whl/cu129/}"
 SKIP_PROJECT="${SKIP_PROJECT:-0}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# venv 放在哪：torch + sglang 装完 6~8 GB，放系统盘容易把盘塞满。
+# 优先用显式指定的 $VENV；否则 AutoDL 这种有独立数据盘的机器用大盘，
+# 其余平台退回 $HOME。都不合适就自己传 VENV=...
+if [ -z "${VENV:-}" ]; then
+  if [ -d /root/autodl-tmp ] && [ -w /root/autodl-tmp ]; then
+    VENV=/root/autodl-tmp/venv-sglang
+  else
+    VENV="$HOME/venv-sglang"
+  fi
+fi
 
 c_ok()   { printf '\033[32m[ OK ]\033[0m %s\n' "$*"; }
 c_info() { printf '\033[36m[ .. ]\033[0m %s\n' "$*"; }
@@ -53,7 +64,7 @@ c_ok "GPU: ${GPU_NAME} | 驱动: ${DRIVER_MAJOR}.x | CUDA(驱动上限): ${CUDA_
 if [ "${DRIVER_MAJOR:-0}" -lt 580 ]; then
   c_warn "驱动主版本 ${DRIVER_MAJOR} < 580。sglang ${SGLANG_VERSION} 的 flashinfer/cutlass 是 cu13 构建，"
   c_warn "在旧驱动上大概率起不来。三个选择："
-  c_warn "  1) 换一台驱动 >= 580 的机器（AutoDL 里看实例详情「驱动/CUDA」列）"
+  c_warn "  1) 换一台驱动 >= 580 的机器（租机器时看实例详情里的「驱动/CUDA」列）"
   c_warn "  2) 改用 cu12 时代的 sglang：SGLANG_VERSION=0.5.9 KERNEL_VERSION=0.3.21 SGLANG_CU12=1 bash $0"
   c_warn "  3) 继续（只在你确定驱动够用的情况下）"
   c_warn "继续安装，10 秒后开始；想中止就 Ctrl-C。"
@@ -65,16 +76,20 @@ fi
 # ---------------------------------------------------------------------
 c_info "准备 uv…"
 if ! command -v uv >/dev/null 2>&1; then
-  # 优先 pip（走国内源，最稳）；失败再走官方安装脚本
+  # 优先 pip（走国内源，最稳）；失败再走官方安装脚本。
+  # 新版 Debian/Ubuntu 的 pip 会因 PEP 668 直接拒装，所以带上 --user 兜底。
   if command -v pip3 >/dev/null 2>&1; then
-    pip3 install -q -i "$PYPI_INDEX" uv || true
+    pip3 install -q -i "$PYPI_INDEX" uv 2>/dev/null \
+      || pip3 install -q --user --break-system-packages -i "$PYPI_INDEX" uv 2>/dev/null \
+      || true
+    export PATH="$HOME/.local/bin:$PATH"
   fi
-  if ! command -v uv >/dev/null 2>&1; then
+  if ! command -v uv >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
   fi
 fi
-command -v uv >/dev/null 2>&1 || c_die "uv 安装失败"
+command -v uv >/dev/null 2>&1 || c_die "uv 安装失败：手动装一次（pip install uv），或把 uv 放进 PATH 后重跑"
 c_ok "uv $(uv --version | awk '{print $2}')"
 
 # ---------------------------------------------------------------------
@@ -84,7 +99,16 @@ if [ -x "$VENV/bin/python" ]; then
   c_ok "复用已有环境 $VENV"
 else
   c_info "创建 venv：$VENV (python $PYTHON_VERSION)"
-  mkdir -p "$(dirname "$VENV")"
+  mkdir -p "$(dirname "$VENV")" 2>/dev/null \
+    || c_die "建不了 $(dirname "$VENV")（权限或磁盘）。换位置重跑：VENV=\$HOME/venv-sglang bash $0"
+  # 装完约 6~8 GB，先看一眼剩余空间，免得装到一半 No space left
+  FREE_G="$(df -Pk "$(dirname "$VENV")" 2>/dev/null | awk 'NR==2{printf "%d", $4/1048576}')"
+  if [ -n "${FREE_G:-}" ] && [ "$FREE_G" -lt 15 ]; then
+    c_warn "$(dirname "$VENV") 只剩 ${FREE_G}G，torch+sglang 装完要 6~8G，"
+    c_warn "容器重启后还会重下。换到大盘：VENV=/your/big/disk/venv-sglang bash $0"
+    c_warn "继续安装，8 秒后开始；想中止就 Ctrl-C。"
+    sleep 8
+  fi
   # uv 会优先用系统里已有的同版本解释器；没有才去下载。
   # 国内下 CPython 慢时可以设 UV_PYTHON_INSTALL_MIRROR。
   if ! uv venv --python "$PYTHON_VERSION" "$VENV"; then

@@ -1,8 +1,10 @@
-# 在 AutoDL 上跑 sglang rollout 消融
+# 在 Linux + NVIDIA 机器上跑 sglang rollout 消融
 
 这份文档只解决一件事：**在 sm80+ 的卡上把 `sglang` 引擎真正跑起来，量出它相对 HF 产线 rollout 的加速比。**
 
 Kaggle 那条路已经走到头（T4 = sm75，上游不再提供该架构的预编译 kernel），结论留在 `docs/sglang-rollout.md` 的附录里。这里是从零到出数的完整步骤。
+
+**本文不绑定平台**：AutoDL、其他 GPU 云、自建机器都适用。脚本里没有任何写死的绝对路径 —— 仓库 clone 到哪就在哪跑，venv 和模型缓存的默认位置按「有没有大盘」自动选。唯一需要你确认的是三个变量：`$REPO`（仓库目录）、`$VENV`（环境目录）、`$CACHE`（权重目录）。
 
 ---
 
@@ -13,9 +15,28 @@ Kaggle 那条路已经走到头（T4 = sm75，上游不再提供该架构的预�
 | GPU | **RTX 4090 24G**（sm89）或 A100 40G（sm80） | bench 档 24G 够；A100 便宜不了多少但显存宽裕 |
 | 驱动 | **≥ 580** | 见下方「为什么卡驱动」 |
 | 镜像 | Ubuntu 22.04 + 任意 Python ≥ 3.10 | 我们自建 venv，不用镜像里的 torch |
-| 磁盘 | 系统盘 ≥ 30G，模型放 `/root/autodl-tmp` | venv + torch + sglang 约 12G；两个模型约 3G |
+| 磁盘 | 装环境的地方留 **≥ 20G**，模型留 ≥ 5G | venv + torch + sglang 约 6~8G；两个模型约 3G |
 
 **不要选 2080Ti / V100 / T4 / P100。** 它们要么是 sm75 及以下（无预编译 kernel），要么没有 bf16，跑出来的数字没有参考价值。
+
+### 1.1 换了平台要改什么
+
+代码里**没有**任何写死的仓库路径。换平台只涉及三个位置，且都有默认值 / 环境变量，不必改源码：
+
+| 要改的东西 | 在哪 | 默认行为 | 覆盖方式 |
+|---|---|---|---|
+| venv 位置 | `scripts/setup_autodl.sh` 的 `VENV` 解析 | 有可写 `/root/autodl-tmp` 就用它，否则 `$HOME/venv-sglang` | `VENV=/data/venv bash scripts/setup_autodl.sh` |
+| 权重缓存 | `scripts/download_models_ms.py::_default_cache()` | AutoDL 大盘 → `$HOME/models` | `--cache /data/models` 或 `MODELSCOPE_CACHE=/data/models` |
+| 仓库位置 | 无 | 脚本用 `BASH_SOURCE` 自己算 `REPO_ROOT` | clone 到哪都行 |
+
+注意：**只有 `python3` 没有 `pip3`，或者 pip 被 PEP 668 锁住时**，脚本已经会退到 `--user --break-system-packages`，再退到 uv 官方安装脚本。若三者都不通（内网），先手动 `pip install uv` 再重跑。
+
+另外两件事与平台相关的环境变量，与代码无关：
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com   # 训练档拉 ultrafeedback 数据集走镜像（bench 用不到）
+export MODELSCOPE_CACHE=/data/models        # 等价于 --cache
+```
 
 ### 为什么卡在驱动 580
 
@@ -28,7 +49,7 @@ nvidia-cutlass-dsl[cu13]==4.5.2
 
 `[cu13]` 表示这两个 wheel 是按 **CUDA 13** 编的，而 CUDA 13 要求驱动 ≥ 580。torch 本身（2.11 + cu128）只要 525+ 就能跑，但 flashinfer 会先炸，报错文本是 `CUDA driver version is insufficient for CUDA runtime version` —— 看起来像驱动没装，其实是版本不够。
 
-AutoDL 上怎么看：实例详情里「驱动/CUDA」那一列，或者 `nvidia-smi` 右上角的 `CUDA Version` 要 ≥ 13.0。
+AutoDL 上怎么看：实例详情里「驱动/CUDA」那一列，或者 `nvidia-smi` 右上角的 `CUDA Version` 要 ≥ 13.0。其他平台同理，`nvidia-smi` 右上角那行就是驱动能支持的最高 CUDA 版本。
 
 驱动只有 550/570 的机器：换机器，别硬拼。真要在旧驱动上跑，退回 cu12 时代的 `sglang==0.5.9`（本仓库没有验证过这条路径，需要自己确认 API 兼容性）。
 
@@ -72,37 +93,47 @@ uv pip install --no-deps --reinstall \
 
 ## 3. 部署（三步）
 
+三个路径变量，先按自己机器设一遍（下文都用它们）：
+
+```bash
+REPO=$HOME/RL-Training          # 仓库放哪都行，脚本按 BASH_SOURCE 定位，不写死
+VENV=$HOME/venv-sglang          # 装 sglang 的独立环境
+CACHE=$HOME/models              # 模型权重
+```
+
+> 有大盘（AutoDL 的 `/root/autodl-tmp`、其他平台的 `/data`、`/workspace`）就指到大盘上，容器重置后不用重下。三个变量都能用同名环境变量覆盖，默认值见 `scripts/setup_autodl.sh` 的 `VENV` 解析与 `download_models_ms.py` 的 `_default_cache()`。
+
 ### 3.1 传代码
 
 ```bash
 # 本地
 git push origin sglang-rollout
-# AutoDL 上
-cd /root/autodl-tmp && git clone -b sglang-rollout <你的仓库地址> RL-Training
-cd RL-Training
+# 机器上（仓库是公开的，clone 不需要 token；默认分支就是 sglang-rollout）
+git clone https://github.com/Traleedo/RL-Training.git "$REPO"
+cd "$REPO"
 ```
 
 ### 3.2 一键装环境
 
 ```bash
-bash scripts/setup_autodl.sh
+bash "$REPO/scripts/setup_autodl.sh"
 ```
 
 脚本做四件事：检查驱动 → 装 uv → 建独立 venv → 装 sglang 并**替换 kernel**。全程不碰系统 python 和 conda。
 
-想装到别处：
+想装到别处（推荐，环境别留在仓库里）：
 
 ```bash
-VENV=/root/autodl-tmp/venv-sglang bash scripts/setup_autodl.sh
+VENV=/data/venv-sglang bash "$REPO/scripts/setup_autodl.sh"
 ```
 
-末尾会打印 `sglang / torch / transformers` 的实际版本和下一步命令。看到 `sgl_kernel 加载成功` 就说明架构匹配上了 —— 这一步过了，后面基本不会再出环境问题。
+末尾会打印 `sglang / torch / transformers` 的实际版本、venv 路径和下一步命令。看到 `sgl_kernel 加载成功` 就说明架构匹配上了 —— 这一步过了，后面基本不会再出环境问题。
 
 ### 3.3 下模型
 
 ```bash
-source /root/autodl-tmp/venv-sglang/bin/activate
-python scripts/download_models_ms.py --only policy
+source "$VENV/bin/activate"
+python "$REPO/scripts/download_models_ms.py" --only policy --cache "$CACHE"
 ```
 
 ModelScope 国内直连，Qwen3-0.6B 约 1.5 GB。bench 只需要策略模型。
@@ -178,8 +209,8 @@ python scripts/download_models_ms.py --only policy,reward-small
 训练命令：
 
 ```bash
-python scripts/train.py -a sglang/grpo --steps 20 \
-    --set reward_model.name_or_path=/root/autodl-tmp/models/Skywork/Skywork-Reward-V2-Qwen3-0.6B
+python "$REPO/scripts/train.py" -a sglang/grpo --steps 20 \
+    --set reward_model.name_or_path="$CACHE/Skywork/Skywork-Reward-V2-Qwen3-0.6B"
 ```
 
 训练档要额外装 TRL（bench 不需要）：
