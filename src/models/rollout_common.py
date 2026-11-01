@@ -73,6 +73,18 @@ def chat_prompt_ids(tokenizer, prompt: str) -> list[int]:
     except (TypeError, ValueError):
         # 少数 tokenizer 的 apply_chat_template 不接受 tokenize=True
         ids = tokenizer(format_chat_text(tokenizer, prompt), add_special_tokens=False)["input_ids"]
+
+    # transformers 5.x 起，``apply_chat_template(tokenize=True)`` 返回的是
+    # BatchEncoding 而不是 ``list[int]`` —— 直接迭代会拿到 "input_ids" 这个 key，
+    # 报 ``invalid literal for int() with base 10: 'input_ids'``。
+    # 版本间差异不该泄漏到引擎层，在这里一次抹平。
+    if isinstance(ids, dict) or hasattr(ids, "keys"):
+        ids = ids["input_ids"]
+    if isinstance(ids, torch.Tensor):
+        ids = ids.tolist()
+    if ids and isinstance(ids[0], (list, tuple, torch.Tensor)):
+        first = ids[0]
+        ids = first.tolist() if isinstance(first, torch.Tensor) else list(first)
     return [int(t) for t in ids]
 
 

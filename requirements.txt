@@ -3,7 +3,12 @@ numpy>=1.24
 tqdm>=4.64
 omegaconf>=2.3
 PyYAML>=6.0
-transformers>=4.37,<5
+# 4.x 与 5.x 都支持：5.x 的差异（apply_chat_template 返回 BatchEncoding、
+# from_pretrained 的 torch_dtype -> dtype）已在代码里做版本分支，
+# 见 models/rollout_common.py::chat_prompt_ids 与 ablate_rollout._load_hf。
+# 上限留到 <6 是因为 sglang 0.5.13 硬 pin transformers==5.8.1，
+# 写死 <5 会让 AutoDL 上「装 sglang 与装本项目」互相顶。
+transformers>=4.37,<6
 modelscope >= 1.40.1
 
 # RL 的 --dataset 下载（本地 --prompts 不需要它）。

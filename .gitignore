@@ -1,0 +1,18 @@
+__pycache__/
+*/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# 训练产物：checkpoint 与日志默认落在这里（见 configs/base.yaml）
+checkpoints/
+runs/
+*.log
+
+# 本地虚拟环境与实验追踪
+.venv/
+venv/
+wandb/
+
+# Kaggle 打包用的临时工作区（含内嵌源码的 notebook，几十 MB）
+.kaggle_work/

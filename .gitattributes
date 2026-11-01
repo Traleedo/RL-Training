@@ -1,0 +1,16 @@
+# 行尾统一按 LF 存/检出。
+#
+# 起因：Windows 上 core.autocrlf=true 时，检出的 .sh 会变成 CRLF，
+# scp 到 Linux 上执行就报
+#   /usr/bin/env: 'bash\r': No such file or directory
+# 这类错误看起来像 bash 没装，其实只是行尾不对。
+#
+# 只对脚本和配置强制 LF；其余交给 text=auto 判断文本/二进制。
+* text=auto
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.ipynb text eol=lf

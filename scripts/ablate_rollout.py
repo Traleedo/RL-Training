@@ -347,9 +347,17 @@ def _load_hf(model_id: str, dtype: str):
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
+
+    # transformers 5.x 把 ``torch_dtype`` 改名为 ``dtype``（旧名仍作为弃用别名
+    # 接受，但每次加载都会打 FutureWarning）。按大版本选，免得日志里的弃用警告
+    # 被当成本次消融的异常。
+    import transformers
+
+    major = int(transformers.__version__.split(".")[0])
+    dtype_kw = {"dtype": torch_dtype} if major >= 5 else {"torch_dtype": torch_dtype}
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch_dtype,
+        **dtype_kw,
         attn_implementation="sdpa",
         trust_remote_code=True,
     )
@@ -411,6 +419,7 @@ def run_bench(args: argparse.Namespace) -> list[Run]:
         measure_engine("hf", hf, runtime="in-process", source="recompute")
 
     if "sglang" in args.backends:
+        engine_kwargs = json.loads(args.engine_kwargs) if args.engine_kwargs else None
         for source in args.logprob_sources:
             sg = SGLangRolloutEngine(
                 model=model,
@@ -423,6 +432,7 @@ def run_bench(args: argparse.Namespace) -> list[Run]:
                 tp_size=args.tp_size,
                 mem_fraction_static=args.mem_fraction,
                 server_url=args.server_url,
+                engine_kwargs=engine_kwargs,
                 num_generations=args.num_generations,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
@@ -736,6 +746,14 @@ def main(argv: list[str] | None = None) -> int:
     bench.add_argument("--dtype", default="bfloat16")
     bench.add_argument("--tp-size", type=int, default=1)
     bench.add_argument("--mem-fraction", type=float, default=0.6)
+    bench.add_argument(
+        "--engine-kwargs",
+        default=None,
+        help="透传给 sglang.Engine 的额外参数，JSON 字符串。"
+        "一般不用传（引擎会自选 backend）；sm75 及更老的卡上必须显式写 "
+        '\'{"attention_backend": "triton"}\' —— FlashInfer 不支持 Turing。'
+        "sm80+ 上若 FlashInfer 初始化失败，也可以用它退回 triton",
+    )
     bench.add_argument("--repeats", type=int, default=3)
     bench.add_argument("--warmup", type=int, default=1)
 
