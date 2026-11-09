@@ -71,8 +71,11 @@ def _apply_rlimits() -> None:  # pragma: no cover - runs in child process
         resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)
         # 20s CPU time cap, independent of wall-time kill
         resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
-        # no more than 64 subprocesses / threads
-        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+        # process/thread cap. NOTE: the kernel counts RLIMIT_NPROC per-uid
+        # *host-wide* (not per-container), so in multi-tenant environments
+        # this limit is unreliable — the authoritative per-container cap is
+        # `docker run --pids-limit`. Keep this as a generous fallback only.
+        resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))
         # max 256 MB output file size, avoids filling the disk
         resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024,) * 2)
     except (ValueError, OSError):
@@ -106,7 +109,11 @@ async def _execute(code: str, run_timeout: int, stdin: str) -> RunResult:
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=_apply_rlimits if os.name == "posix" else None,
             env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8",
-                 "HOME": str(workdir), "TMPDIR": str(workdir)},
+                 "HOME": str(workdir), "TMPDIR": str(workdir),
+                 # cap BLAS thread pools: every thread counts toward the
+                 # pids budget and small models don't benefit from >2
+                 "OPENBLAS_NUM_THREADS": "2", "OMP_NUM_THREADS": "2",
+                 "MKL_NUM_THREADS": "2", "NUMEXPR_NUM_THREADS": "2"},
         )
         try:
             out, err = await asyncio.wait_for(
