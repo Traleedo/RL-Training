@@ -43,6 +43,11 @@ GROUP_IDS = "group_ids"                  # [B]     = arange(G).repeat_interleave
 PROMPT_TEXTS = "prompt_texts"            # list[str]，长度 B（已按 num_generations 展开）
 RESPONSE_TEXTS = "response_texts"        # list[str]
 PROMPT_LENGTHS = "prompt_lengths"        # list[int]
+#: ``list[str]``，每行的标准答案，与 ``RESPONSE_TEXTS`` 逐行对齐。
+#:
+#: 由 prompt 侧在构造 Batch 时写入（rollout 只负责生成，不负责携带答案）。
+#: 只放最终答案本身；可验证奖励（数学等）靠它判断对错。
+SOLUTIONS = "solutions"
 
 # =====================================================================
 # 相位 B：打分与奖励处理

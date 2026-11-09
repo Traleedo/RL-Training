@@ -10,6 +10,12 @@ modelscope >= 1.40.1
 # 没装时只有 --dataset 这条路会报错，训练其余部分不受影响。
 datasets >= 2.19
 
+# 基于规则的数学答案判定（components/scorers/ruled_based_math_reward.py）。
+# 只有配置里选 reward.scorer.type: ruled_based_math_reward 时才需要；
+# 该 scorer 内部是惰性导入，没装这两个包不影响其它 scorer 与框架启动。
+math-verify >= 0.9
+latex2sympy2-extended >= 1.11
+
 # wandb 日志后端（**可选**，见 configs/base.yaml 里注释掉的 loggers 示例）。
 #
 # 不写死在这里：没装时 WandbLogger 会降级为 no-op 并打一条 WARNING，
